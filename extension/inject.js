@@ -8,7 +8,7 @@
   const SOURCE = "meet-ai"
   const MIN_CLIP_MS = 300
   const MAX_CLIP_MS = 60_000
-  const DUCK_VOLUME = 0.2
+  const DUCK_VOLUME = 0
   const RECORDER_MIME = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"].find(
     (type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type)
   ) || ""
@@ -63,6 +63,10 @@
     // Without headphones the client's Bangla voice leaks into the mic; then mute
     // outgoing capture while it plays. With headphones, keep listening.
     gateOnPlayback: false,
+    // When true, remote client speech in Google Meet is kept muted so you only hear
+    // the AI-generated Bangla translation without double audio.
+    muteClientOriginal: true,
+    incomingActive: false,
     incoming: { bus: null, dest: null, sources: new Map(), observer: null, rescanTimer: null, users: 0 },
     playQueues: { outgoing: Promise.resolve(), incoming: Promise.resolve() },
     duckCount: 0,
@@ -189,6 +193,7 @@
         if (stream instanceof MediaStream) {
           knownRemoteStreams.add(stream)
           if (state.incoming.bus) connectIncomingSources()
+          applyMeetAudioMuting()
         }
       }
       Object.defineProperty(HTMLMediaElement.prototype, "srcObject", desc)
@@ -197,16 +202,87 @@
     // Non-fatal if property descriptor cannot be rewritten
   }
 
+  try {
+    const volDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume")
+    if (volDesc && volDesc.set) {
+      const origVolSet = volDesc.set
+      const origVolGet = volDesc.get
+      Object.defineProperty(HTMLMediaElement.prototype, "volume", {
+        get() {
+          return origVolGet.call(this)
+        },
+        set(val) {
+          if (shouldMuteMeetAudio() && (this.tagName === "AUDIO" || this.srcObject instanceof MediaStream)) {
+            state.duckedVolumes.set(this, val)
+            return origVolSet.call(this, 0)
+          }
+          return origVolSet.call(this, val)
+        },
+        configurable: true,
+        enumerable: true,
+      })
+    }
+  } catch {
+    // Non-fatal
+  }
+
   const getMeetMediaElements = () =>
     Array.from(document.querySelectorAll("audio, video")).filter(
       (el) => el.srcObject instanceof MediaStream
     )
 
-  // Returns all <audio> elements in the page — used for volume ducking while
-  // the Bangla translation plays so the original audio doesn't interfere.
-  const getMeetAudioElements = () => Array.from(document.querySelectorAll("audio"))
+  // Returns all audio elements in the page — used for muting remote participants'
+  // original voice so only the translated AI voice is heard.
+  const getMeetAudioElements = () => {
+    const elements = new Set(document.querySelectorAll("audio"))
+    document.querySelectorAll("video").forEach((el) => {
+      if (el.srcObject instanceof MediaStream) elements.add(el)
+    })
+    return Array.from(elements)
+  }
+
+  const isIncomingActive = () =>
+    Boolean(
+      state.incomingActive ||
+      state.incoming.users > 0 ||
+      state.streams.incoming ||
+      state.live.incoming ||
+      state.recorders.incoming
+    )
+
+  const shouldMuteMeetAudio = () =>
+    (state.muteClientOriginal && isIncomingActive()) || state.duckCount > 0
+
+  const applyMeetAudioMuting = () => {
+    const mute = shouldMuteMeetAudio()
+    getMeetAudioElements().forEach((el) => {
+      if (mute) {
+        if (!state.duckedVolumes.has(el)) {
+          state.duckedVolumes.set(el, el.volume)
+        }
+        if (el.volume !== 0) {
+          try {
+            el.volume = 0
+          } catch {
+            // Non-fatal
+          }
+        }
+      } else {
+        if (state.duckedVolumes.has(el)) {
+          const original = state.duckedVolumes.get(el)
+          state.duckedVolumes.delete(el)
+          try {
+            el.volume = typeof original === "number" && !isNaN(original) && original > 0 ? original : 1
+          } catch {
+            // Non-fatal
+          }
+        }
+      }
+    })
+  }
 
   const connectIncomingSources = () => {
+    applyMeetAudioMuting()
     const { incoming, audioCtx } = state
     if (!incoming.bus) return
 
@@ -236,6 +312,7 @@
   const acquireIncomingMix = () => {
     const { incoming } = state
     incoming.users += 1
+    applyMeetAudioMuting()
     if (incoming.bus) return incoming
     const ctx = ensureAudioGraph()
     incoming.bus = ctx.createGain()
@@ -254,6 +331,7 @@
   const releaseIncomingMix = () => {
     const { incoming } = state
     incoming.users = Math.max(0, incoming.users - 1)
+    applyMeetAudioMuting()
     if (incoming.users > 0 || !incoming.bus) return
     incoming.observer?.disconnect()
     window.clearInterval(incoming.rescanTimer)
@@ -668,11 +746,13 @@
 
     if (!player.active) {
       player.active = true
+      if (direction === "incoming") duckMeetAudio()
       post("STATUS", { direction, state: "voice_on" })
     }
     window.clearTimeout(player.doneTimer)
     player.doneTimer = window.setTimeout(() => {
       player.active = false
+      if (direction === "incoming") restoreMeetAudio()
       post("STATUS", { direction, state: "voice_off" })
     }, (player.nextTime - now) * 1000 + 150)
   }
@@ -689,18 +769,12 @@
 
   const duckMeetAudio = () => {
     state.duckCount += 1
-    if (state.duckCount > 1) return
-    getMeetAudioElements().forEach((el) => {
-      state.duckedVolumes.set(el, el.volume)
-      el.volume = Math.min(el.volume, DUCK_VOLUME)
-    })
+    applyMeetAudioMuting()
   }
 
   const restoreMeetAudio = () => {
     state.duckCount = Math.max(0, state.duckCount - 1)
-    if (state.duckCount > 0) return
-    state.duckedVolumes.forEach((volume, el) => { el.volume = volume })
-    state.duckedVolumes.clear()
+    applyMeetAudioMuting()
   }
 
   const playBuffer = (audioBuffer, destination) =>
@@ -761,16 +835,31 @@
       return
     }
     if (msg.type === "SETTINGS") {
-      state.gateOnPlayback = Boolean(msg.gateOnPlayback)
+      if (typeof msg.gateOnPlayback === "boolean") state.gateOnPlayback = msg.gateOnPlayback
+      if (typeof msg.muteClientOriginal === "boolean") state.muteClientOriginal = msg.muteClientOriginal
+      applyMeetAudioMuting()
+      return
+    }
+    if (msg.type === "INCOMING_STATE") {
+      state.incomingActive = Boolean(msg.active)
+      applyMeetAudioMuting()
       return
     }
     if (!isDirection(msg.direction)) return
 
     if (msg.type === "START_STREAM") {
+      if (msg.direction === "incoming") {
+        state.incomingActive = true
+        applyMeetAudioMuting()
+      }
       startStream(msg.direction).catch(reportError(msg.direction))
       return
     }
     if (msg.type === "STOP_STREAM") {
+      if (msg.direction === "incoming") {
+        state.incomingActive = false
+        applyMeetAudioMuting()
+      }
       stopStream(msg.direction)
       return
     }
@@ -779,11 +868,19 @@
       return
     }
     if (msg.type === "START_REC") {
+      if (msg.direction === "incoming") {
+        state.incomingActive = true
+        applyMeetAudioMuting()
+      }
       const start = msg.mode === "vad" ? startLive(msg.direction, msg.silenceMs) : startRecording(msg.direction)
       start.catch(reportError(msg.direction))
       return
     }
     if (msg.type === "STOP_REC") {
+      if (msg.direction === "incoming") {
+        state.incomingActive = false
+        applyMeetAudioMuting()
+      }
       if (state.live[msg.direction]) stopLive(msg.direction, true)
       else stopRecording(msg.direction)
       return

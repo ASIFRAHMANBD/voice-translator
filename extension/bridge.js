@@ -119,6 +119,7 @@
     // With headphones the client's Bangla voice can't leak into the mic, so we
     // keep listening to the host while it plays.
     headphones: true,
+    muteClientOriginal: true,
     incomingPlaying: false,
     recentTurns: [],
     history: [],
@@ -410,6 +411,10 @@
     headphonesInput.addEventListener("change", handleHeadphonesChange)
     ui.headphonesInput = headphonesInput
 
+    const muteClientInput = el("input", { id: "mai-mute-client", type: "checkbox", "aria-describedby": "mai-mute-client-hint" })
+    muteClientInput.addEventListener("change", handleMuteClientChange)
+    ui.muteClientInput = muteClientInput
+
     const speakBanglaInput = el("input", { id: "mai-speak-bangla", type: "checkbox", "aria-describedby": "mai-speak-bangla-hint" })
     speakBanglaInput.addEventListener("change", handleSpeakBanglaChange)
     ui.speakBanglaInput = speakBanglaInput
@@ -452,6 +457,15 @@
         className: "mai-hint",
         id: "mai-headphones-hint",
         text: "Keeps listening to you while the client's Bangla plays. Turn off when using speakers, so their voice isn't translated back to them.",
+      }),
+      el("label", { className: "mai-check", for: "mai-mute-client" }, [
+        muteClientInput,
+        el("span", { text: "Mute client's original voice" }),
+      ]),
+      el("p", {
+        className: "mai-hint",
+        id: "mai-mute-client-hint",
+        text: "Mutes the client's real Japanese/English voice in Google Meet so you only hear the translated Bangla voice.",
       }),
       el("label", { for: "mai-client-source", className: "mai-field-label", text: "Get the client's words from" }),
       clientSourceSelect,
@@ -588,6 +602,9 @@
     const directionState = state.directions[direction]
     directionState.status = status
     if (status !== "live") directionState.speaking = false
+    if (direction === "incoming") {
+      postToInject("INCOMING_STATE", { active: status !== "idle" })
+    }
     renderAll()
   }
 
@@ -1543,7 +1560,19 @@
   const handleHeadphonesChange = (event) => {
     state.headphones = event.target.checked
     storageSet({ headphones: state.headphones })
-    postToInject("SETTINGS", { gateOnPlayback: !state.headphones })
+    postToInject("SETTINGS", {
+      gateOnPlayback: !state.headphones,
+      muteClientOriginal: state.muteClientOriginal,
+    })
+  }
+
+  const handleMuteClientChange = (event) => {
+    state.muteClientOriginal = event.target.checked
+    storageSet({ muteClientOriginal: state.muteClientOriginal })
+    postToInject("SETTINGS", {
+      gateOnPlayback: !state.headphones,
+      muteClientOriginal: state.muteClientOriginal,
+    })
   }
 
   const handleSpeakBanglaChange = (event) => {
@@ -1783,7 +1812,7 @@
 
     const saved = await storageGet([
       "targetLang", "collapsed", "position", "mode", "silenceMs", "speakBangla", ENGINE_STORAGE_KEY, "voiceRate", CLIENT_SOURCE_STORAGE_KEY, "clientSource",
-      "headphones",
+      "headphones", "muteClientOriginal",
     ])
     state.targetLang = saved.targetLang === "en" ? "en" : "ja"
     state.mode = MODES.includes(saved.mode) ? saved.mode : "vad"
@@ -1793,6 +1822,7 @@
     const savedEngine = saved[ENGINE_STORAGE_KEY]
     state.engine = ENGINES.includes(savedEngine) && (savedEngine !== "google" || SpeechRecognitionApi) ? savedEngine : DEFAULT_ENGINE
     state.headphones = saved.headphones !== false
+    state.muteClientOriginal = saved.muteClientOriginal !== false
     state.voiceRate = VOICE_RATES.some((option) => option.value === saved.voiceRate) ? saved.voiceRate : DEFAULT_VOICE_RATE
     const savedClientSource = saved[CLIENT_SOURCE_STORAGE_KEY] || saved.clientSource
     state.clientSource = CLIENT_SOURCES.includes(savedClientSource) && (savedClientSource !== "captions" || Captions)
@@ -1804,6 +1834,7 @@
     ui.speakBanglaInput.checked = state.speakBangla
     ui.engineSelect.value = state.engine
     ui.headphonesInput.checked = state.headphones
+    ui.muteClientInput.checked = state.muteClientOriginal
     ui.voiceRateSelect.value = String(state.voiceRate)
     ui.clientSourceSelect.value = state.clientSource
     renderSummaryButton()
@@ -1818,7 +1849,10 @@
       if (ui.panel.style.left) applyPosition(ui.panel, { left: ui.panel.offsetLeft, top: ui.panel.offsetTop })
     })
     postToInject("HELLO")
-    postToInject("SETTINGS", { gateOnPlayback: !state.headphones })
+    postToInject("SETTINGS", {
+      gateOnPlayback: !state.headphones,
+      muteClientOriginal: state.muteClientOriginal,
+    })
   }
 
   init()

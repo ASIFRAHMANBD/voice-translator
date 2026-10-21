@@ -11,7 +11,8 @@ import { guessLangFromText } from "../lib/lang.js"
 // Backend -> extension: ready | status | interim { text } | segment { text, lang } | error | closed
 
 const MAX_AUDIO_BASE64 = 256 * 1024
-const MAX_QUEUED_FRAMES = 50
+// Keep up to ~10 seconds of audio frames during upstream reconnects (each frame ≈ 200ms of 24kHz PCM).
+const MAX_QUEUED_FRAMES = 300
 const MAX_RECONNECTS = 5
 // A finished sentence ("?", "。", ". ") is sent after this short wait, so a very
 // short one ("OK.") can still merge with the next.
@@ -44,6 +45,7 @@ type Outgoing =
 type UpstreamEvent = {
   type?: string
   delta?: string
+  transcript?: string
   session?: { audio?: { input?: { transcription?: { model?: string } | null } } }
   error?: { message?: string }
 }
@@ -91,7 +93,9 @@ const buildSessionUpdate = () => {
           transcription: { model: transcribeModel },
           // Meet has already cleaned up remote audio; more processing only hurts.
           noise_reduction: null,
-          // Streaming models transcribe continuously and reject turn detection.
+          // gpt-realtime-whisper is a continuous streaming model: it transcribes
+          // word-by-word and explicitly rejects turn_detection. Leave it null.
+          // Flushing is handled by our pause timers and the completed event.
           turn_detection: null,
         },
       },
@@ -236,6 +240,30 @@ export const handleTranscribeClient = (client: WebSocket): void => {
       }
       case "conversation.item.input_audio_transcription.delta":
         if (event.delta) handleDelta(event.delta)
+        return
+      // The completed event carries the finalized transcript for the whole turn.
+      // If our buffer still holds partial text (e.g. the delta stream lagged),
+      // merge it so not a single word is lost.
+      case "conversation.item.input_audio_transcription.completed": {
+        const finalText = event.transcript ?? ""
+        if (finalText.trim()) {
+          clearSegmentTimers()
+          // Replace buffer with the authoritative final text if it is longer,
+          // otherwise keep what we already have (delta stream was ahead).
+          if (finalText.trim().length > buffer.trim().length) {
+            buffer = finalText.trim()
+          }
+          flushAll()
+        }
+        return
+      }
+      // Speech-stopped is not fired by gpt-realtime-whisper (turn_detection is null),
+      // but handle it defensively in case of model updates.
+      case "input_audio_buffer.speech_stopped":
+        if (buffer.trim() && pauseTimer) {
+          clearTimeout(pauseTimer)
+          pauseTimer = setTimeout(flushAll, 200)
+        }
         return
       case "error": {
         const message = event.error?.message || "Client transcription error"

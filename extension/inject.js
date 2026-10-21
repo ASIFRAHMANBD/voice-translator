@@ -202,6 +202,10 @@
       (el) => el.srcObject instanceof MediaStream
     )
 
+  // Returns all <audio> elements in the page — used for volume ducking while
+  // the Bangla translation plays so the original audio doesn't interfere.
+  const getMeetAudioElements = () => Array.from(document.querySelectorAll("audio"))
+
   const connectIncomingSources = () => {
     const { incoming, audioCtx } = state
     if (!incoming.bus) return

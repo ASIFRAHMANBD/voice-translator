@@ -807,8 +807,10 @@
         directionState.pending -= 1
         return deliverResponse(clip, response, true)
       })
-      .catch(() => {
-        // Keep the chain alive for the next clip.
+      .catch((err) => {
+        // Keep the chain alive for the next clip, but decrement pending.
+        directionState.pending = Math.max(0, directionState.pending - 1)
+        console.warn('[client live] enqueueLiveClip error (chain kept alive):', err?.message || err)
       })
   }
 

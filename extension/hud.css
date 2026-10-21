@@ -1,0 +1,602 @@
+/* Everything is scoped under #meet-ai-hud so Meet's styles and ours never collide. */
+#meet-ai-hud {
+  --mai-surface: #202124;
+  --mai-surface-raised: #303134;
+  --mai-border: #3c4043;
+  --mai-text: #e8eaed;
+  --mai-text-muted: #bdc1c6;
+  --mai-accent: #8ab4f8;
+  --mai-outgoing: #1a73e8;
+  --mai-incoming: #188038;
+  --mai-recording: #c5221f;
+  --mai-success: #81c995;
+  --mai-warning: #fdd663;
+  --mai-danger: #f28b82;
+  --mai-focus: #8ab4f8;
+  --mai-radius-sm: 6px;
+  --mai-radius-md: 8px;
+  --mai-radius-lg: 12px;
+  --mai-space-1: 4px;
+  --mai-space-2: 8px;
+  --mai-space-3: 12px;
+  --mai-space-4: 16px;
+  --mai-duration: 120ms;
+
+  position: fixed;
+  right: 16px;
+  bottom: 96px;
+  z-index: 2147483000;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+  background: var(--mai-surface);
+  color: var(--mai-text);
+  border: 1px solid var(--mai-border);
+  border-radius: var(--mai-radius-lg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font: 400 13px/1.45 "Google Sans", Roboto, "Noto Sans Bengali", "Noto Sans JP", system-ui, sans-serif;
+  text-align: left;
+}
+
+#meet-ai-hud *,
+#meet-ai-hud *::before,
+#meet-ai-hud *::after {
+  box-sizing: border-box;
+}
+
+#meet-ai-hud [hidden] {
+  display: none !important;
+}
+
+#meet-ai-hud p {
+  margin: 0;
+}
+
+#meet-ai-hud .mai-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Header ------------------------------------------------------------------ */
+#meet-ai-hud .mai-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mai-space-2);
+  padding: var(--mai-space-2) var(--mai-space-2) var(--mai-space-2) var(--mai-space-3);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+#meet-ai-hud[data-dragging="true"] .mai-header {
+  cursor: grabbing;
+}
+
+#meet-ai-hud .mai-grip {
+  color: var(--mai-text-muted);
+  font-size: 11px;
+  letter-spacing: -2px;
+}
+
+#meet-ai-hud .mai-title {
+  flex: 1;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--mai-text);
+}
+
+#meet-ai-hud .mai-select,
+#meet-ai-hud .mai-input {
+  background: var(--mai-surface-raised);
+  color: var(--mai-text);
+  border: 1px solid #5f6368;
+  border-radius: var(--mai-radius-sm);
+  font: inherit;
+}
+
+#meet-ai-hud .mai-select {
+  padding: var(--mai-space-1) var(--mai-space-2);
+  cursor: pointer;
+}
+
+#meet-ai-hud .mai-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--mai-text);
+  border: 0;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#meet-ai-hud .mai-icon-btn:hover {
+  background: var(--mai-surface-raised);
+}
+
+/* Body -------------------------------------------------------------------- */
+#meet-ai-hud .mai-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-2);
+  padding: 0 var(--mai-space-3) var(--mai-space-3);
+}
+
+#meet-ai-hud .mai-mic {
+  font-size: 12px;
+  color: var(--mai-text-muted);
+}
+
+#meet-ai-hud .mai-mic::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--mai-space-2);
+  border-radius: 50%;
+  border: 1px solid var(--mai-text-muted);
+  vertical-align: middle;
+}
+
+#meet-ai-hud .mai-mic[data-ready="true"]::before {
+  background: var(--mai-success);
+  border-color: var(--mai-success);
+}
+
+#meet-ai-hud .mai-mic[data-ready="muted"] {
+  color: var(--mai-warning);
+}
+
+#meet-ai-hud .mai-mic[data-ready="muted"]::before {
+  background: var(--mai-warning);
+  border-color: var(--mai-warning);
+}
+
+/* Mode switch ------------------------------------------------------------- */
+#meet-ai-hud .mai-mode {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+#meet-ai-hud .mai-segments {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 2px;
+  background: var(--mai-surface-raised);
+  border: 1px solid var(--mai-border);
+  border-radius: var(--mai-radius-md);
+}
+
+#meet-ai-hud .mai-segment {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  border-radius: var(--mai-radius-sm);
+  color: var(--mai-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--mai-duration) ease, color var(--mai-duration) ease;
+}
+
+#meet-ai-hud .mai-segment-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+#meet-ai-hud .mai-segment:has(.mai-segment-input:checked) {
+  background: var(--mai-surface);
+  color: var(--mai-text);
+  box-shadow: 0 0 0 1px #5f6368;
+}
+
+#meet-ai-hud .mai-segment:has(.mai-segment-input:disabled) {
+  cursor: not-allowed;
+}
+
+#meet-ai-hud .mai-segment:has(.mai-segment-input:disabled:not(:checked)) {
+  opacity: 0.5;
+}
+
+#meet-ai-hud .mai-segment:has(.mai-segment-input:focus-visible) {
+  outline: 2px solid var(--mai-focus);
+  outline-offset: 1px;
+}
+
+#meet-ai-hud .mai-hint {
+  font-size: 11px;
+  color: var(--mai-text-muted);
+}
+
+#meet-ai-hud .mai-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-2);
+}
+
+/* Buttons ----------------------------------------------------------------- */
+#meet-ai-hud .mai-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--mai-space-2);
+  width: 100%;
+  min-height: 40px;
+  padding: var(--mai-space-2) var(--mai-space-3);
+  border: 0;
+  border-radius: var(--mai-radius-md);
+  color: #fff;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter var(--mai-duration) ease, background-color var(--mai-duration) ease;
+}
+
+#meet-ai-hud .mai-btn-outgoing { background: var(--mai-outgoing); }
+#meet-ai-hud .mai-btn-incoming { background: var(--mai-incoming); }
+/* One click for both directions: the main action in hands-free mode. */
+#meet-ai-hud .mai-btn-conversation {
+  min-height: 44px;
+  background: linear-gradient(90deg, var(--mai-outgoing), var(--mai-incoming));
+}
+#meet-ai-hud .mai-btn[hidden] { display: none; }
+#meet-ai-hud .mai-btn[data-state="recording"],
+#meet-ai-hud .mai-btn[data-state="live"] { background: var(--mai-recording); }
+
+#meet-ai-hud .mai-btn-secondary {
+  width: auto;
+  min-height: 32px;
+  background: var(--mai-surface-raised);
+  border: 1px solid #5f6368;
+}
+
+#meet-ai-hud .mai-btn:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+#meet-ai-hud .mai-btn:active:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+#meet-ai-hud .mai-btn:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+#meet-ai-hud .mai-btn-label {
+  flex: 1;
+  text-align: left;
+}
+
+#meet-ai-hud .mai-kbd {
+  padding: 1px var(--mai-space-1);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 4px;
+  font: 11px/1.4 ui-monospace, Menlo, monospace;
+  opacity: 0.9;
+}
+
+#meet-ai-hud .mai-spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: mai-spin 0.8s linear infinite;
+}
+
+#meet-ai-hud .mai-btn[data-state="processing"] .mai-spinner {
+  display: inline-block;
+}
+
+#meet-ai-hud .mai-btn[data-state="recording"] .mai-spinner,
+#meet-ai-hud .mai-btn[data-state="live"] .mai-spinner {
+  display: inline-block;
+  border: 0;
+  background: #fff;
+  animation: mai-pulse 1.2s ease-in-out infinite;
+}
+
+#meet-ai-hud .mai-btn[data-state="live"][data-speaking="false"] .mai-spinner {
+  opacity: 0.55;
+  animation: none;
+}
+
+#meet-ai-hud .mai-btn[data-state="live"][data-speaking="true"] .mai-spinner {
+  animation-duration: 0.6s;
+}
+
+#meet-ai-hud .mai-select-block {
+  width: 100%;
+  min-height: 32px;
+}
+
+@keyframes mai-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes mai-pulse {
+  50% { opacity: 0.35; }
+}
+
+#meet-ai-hud .mai-link-btn {
+  margin-left: var(--mai-space-2);
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--mai-accent);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#meet-ai-hud :focus-visible {
+  outline: 2px solid var(--mai-focus);
+  outline-offset: 2px;
+}
+
+/* Status ------------------------------------------------------------------ */
+#meet-ai-hud .mai-status {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--mai-accent);
+}
+
+#meet-ai-hud .mai-status[data-tone="success"] { color: var(--mai-success); }
+#meet-ai-hud .mai-status[data-tone="warning"] { color: var(--mai-warning); }
+#meet-ai-hud .mai-status[data-tone="error"] { color: var(--mai-danger); }
+
+/* Log --------------------------------------------------------------------- */
+#meet-ai-hud .mai-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-2);
+  max-height: 260px;
+  min-height: 56px;
+  overflow-y: auto;
+  padding: var(--mai-space-2);
+  background: var(--mai-surface-raised);
+  border-radius: var(--mai-radius-md);
+  overscroll-behavior: contain;
+}
+
+#meet-ai-hud .mai-empty {
+  color: var(--mai-text-muted);
+  font-size: 12px;
+}
+
+#meet-ai-hud .mai-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-1);
+  padding-left: var(--mai-space-2);
+  border-left: 3px solid var(--mai-outgoing);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+#meet-ai-hud .mai-entry-incoming {
+  border-left-color: var(--mai-success);
+}
+
+/* Live interpreter entry that is still receiving words. */
+#meet-ai-hud .mai-entry[data-live] .mai-entry-meta::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: var(--mai-space-1);
+  border-radius: 50%;
+  background: var(--mai-danger);
+  vertical-align: middle;
+  animation: mai-pulse 1s ease-in-out infinite;
+}
+
+#meet-ai-hud .mai-entry-meta {
+  font-size: 11px;
+  color: var(--mai-text-muted);
+}
+
+#meet-ai-hud .mai-entry-source {
+  font-size: 12px;
+  color: var(--mai-text-muted);
+}
+
+#meet-ai-hud .mai-entry-translation {
+  font-size: 14px;
+  color: var(--mai-text);
+}
+
+#meet-ai-hud .mai-interim {
+  padding: var(--mai-space-2) var(--mai-space-3);
+  border-radius: var(--mai-radius-sm);
+  background: var(--mai-surface-raised);
+  font-size: 13px;
+  color: var(--mai-text-muted);
+  overflow-wrap: anywhere;
+}
+
+#meet-ai-hud .mai-interim[hidden] {
+  display: none;
+}
+
+#meet-ai-hud .mai-interim[data-direction="outgoing"] {
+  border-left: 3px solid var(--mai-accent);
+}
+
+#meet-ai-hud .mai-interim[data-direction="incoming"] {
+  border-left: 3px solid var(--mai-success);
+}
+
+#meet-ai-hud .mai-interim-label {
+  margin-right: var(--mai-space-1);
+  font-weight: 600;
+  color: var(--mai-text);
+}
+
+#meet-ai-hud .mai-interim-label::after {
+  content: ":";
+}
+
+#meet-ai-hud .mai-entry-understood {
+  font-size: 12px;
+  color: var(--mai-text);
+}
+
+#meet-ai-hud .mai-entry-understood-label {
+  color: var(--mai-text-muted);
+}
+
+#meet-ai-hud .mai-entry-unclear {
+  font-size: 13px;
+  color: var(--mai-warning);
+}
+
+#meet-ai-hud .mai-entry-analysis {
+  margin-top: var(--mai-space-1);
+  padding: var(--mai-space-2);
+  background: var(--mai-surface);
+  border-radius: var(--mai-radius-sm);
+}
+
+#meet-ai-hud .mai-entry-analysis-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--mai-warning);
+}
+
+/* Settings ---------------------------------------------------------------- */
+#meet-ai-hud .mai-settings-summary {
+  font-size: 12px;
+  color: var(--mai-text-muted);
+  cursor: pointer;
+}
+
+#meet-ai-hud .mai-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-1);
+  margin-top: var(--mai-space-2);
+}
+
+#meet-ai-hud .mai-field-label {
+  font-size: 12px;
+  color: var(--mai-text-muted);
+}
+
+#meet-ai-hud .mai-check {
+  display: flex;
+  align-items: center;
+  gap: var(--mai-space-2);
+  min-height: 24px;
+  font-size: 12px;
+  color: var(--mai-text);
+  cursor: pointer;
+}
+
+#meet-ai-hud .mai-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--mai-accent);
+  cursor: pointer;
+}
+
+#meet-ai-hud .mai-input {
+  width: 100%;
+  min-height: 32px;
+  padding: var(--mai-space-1) var(--mai-space-2);
+}
+
+#meet-ai-hud .mai-input[aria-invalid="true"] {
+  border-color: var(--mai-danger);
+}
+
+#meet-ai-hud .mai-settings-row {
+  display: flex;
+  align-items: center;
+  gap: var(--mai-space-2);
+  margin-top: var(--mai-space-2);
+}
+
+#meet-ai-hud .mai-btn-block {
+  width: 100%;
+}
+
+#meet-ai-hud .mai-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-1);
+}
+
+#meet-ai-hud .mai-summary-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-2);
+  margin-top: var(--mai-space-2);
+  padding: var(--mai-space-3);
+  background: var(--mai-surface-raised);
+  border-radius: var(--mai-radius-md);
+}
+
+#meet-ai-hud .mai-summary-result[hidden] {
+  display: none;
+}
+
+#meet-ai-hud .mai-summary-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mai-text);
+}
+
+#meet-ai-hud .mai-summary-text {
+  max-height: 240px;
+  margin: 0;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--mai-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+}
+
+#meet-ai-hud .mai-settings-row {
+  flex-wrap: wrap;
+}
+
+#meet-ai-hud .mai-settings-feedback { font-size: 12px; }
+#meet-ai-hud .mai-settings-feedback[data-tone="success"] { color: var(--mai-success); }
+#meet-ai-hud .mai-settings-feedback[data-tone="error"] { color: var(--mai-danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  #meet-ai-hud .mai-btn,
+  #meet-ai-hud .mai-segment { transition: none; }
+  #meet-ai-hud .mai-spinner { animation: none !important; }
+}
+
+@media (forced-colors: active) {
+  #meet-ai-hud,
+  #meet-ai-hud .mai-btn,
+  #meet-ai-hud .mai-log {
+    border: 1px solid CanvasText;
+  }
+}

@@ -469,6 +469,15 @@
   color: var(--mai-warning);
 }
 
+#meet-ai-hud .mai-entry-failed {
+  border-left: 3px solid var(--mai-warning);
+}
+
+#meet-ai-hud .mai-entry-retry {
+  align-self: flex-start;
+  margin-top: var(--mai-space-1);
+}
+
 #meet-ai-hud .mai-entry-analysis {
   margin-top: var(--mai-space-1);
   padding: var(--mai-space-2);

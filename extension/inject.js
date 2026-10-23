@@ -9,6 +9,13 @@
   const MIN_CLIP_MS = 300
   const MAX_CLIP_MS = 60_000
   const DUCK_VOLUME = 0
+  // Meet's own audio stays faintly audible while the translation plays, so the host can still
+  // tell the client is talking even if a translation is late. Without headphones it must be
+  // silent, otherwise the client's voice leaks from the speakers into the mic.
+  const DUCK_LEVEL = 0.2
+  // A clip that never reports "ended" (suspended AudioContext, tab throttling) must not block the queue.
+  const PLAYBACK_END_GRACE_MS = 1_500
+  const DUCK_WATCHDOG_MS = 2_000
   const RECORDER_MIME = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"].find(
     (type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type)
   ) || ""
@@ -71,6 +78,8 @@
     playQueues: { outgoing: Promise.resolve(), incoming: Promise.resolve() },
     duckCount: 0,
     duckedVolumes: new Map(),
+    applyingDuck: false,
+    clipsPlaying: 0,
   }
 
   const post = (type, payload = {}, transfer = []) => {
@@ -213,8 +222,9 @@
         },
         set(val) {
           if (shouldMuteMeetAudio() && (this.tagName === "AUDIO" || this.srcObject instanceof MediaStream)) {
-            state.duckedVolumes.set(this, val)
-            return origVolSet.call(this, 0)
+            // Our own ducking writes must not overwrite the volume Meet asked for.
+            if (!state.applyingDuck) state.duckedVolumes.set(this, val)
+            return origVolSet.call(this, duckLevel())
           }
           return origVolSet.call(this, val)
         },
@@ -253,32 +263,40 @@
   const shouldMuteMeetAudio = () =>
     (state.muteClientOriginal && isIncomingActive()) || state.duckCount > 0
 
+  const duckLevel = () => (state.gateOnPlayback ? DUCK_VOLUME : DUCK_LEVEL)
+
   const applyMeetAudioMuting = () => {
     const mute = shouldMuteMeetAudio()
-    getMeetAudioElements().forEach((el) => {
-      if (mute) {
-        if (!state.duckedVolumes.has(el)) {
-          state.duckedVolumes.set(el, el.volume)
-        }
-        if (el.volume !== 0) {
-          try {
-            el.volume = 0
-          } catch {
-            // Non-fatal
+    const level = duckLevel()
+    state.applyingDuck = true
+    try {
+      getMeetAudioElements().forEach((el) => {
+        if (mute) {
+          if (!state.duckedVolumes.has(el)) {
+            state.duckedVolumes.set(el, el.volume)
+          }
+          if (el.volume !== level) {
+            try {
+              el.volume = level
+            } catch {
+              // Non-fatal
+            }
+          }
+        } else {
+          if (state.duckedVolumes.has(el)) {
+            const original = state.duckedVolumes.get(el)
+            state.duckedVolumes.delete(el)
+            try {
+              el.volume = typeof original === "number" && !isNaN(original) && original > 0 ? original : 1
+            } catch {
+              // Non-fatal
+            }
           }
         }
-      } else {
-        if (state.duckedVolumes.has(el)) {
-          const original = state.duckedVolumes.get(el)
-          state.duckedVolumes.delete(el)
-          try {
-            el.volume = typeof original === "number" && !isNaN(original) && original > 0 ? original : 1
-          } catch {
-            // Non-fatal
-          }
-        }
-      }
-    })
+      })
+    } finally {
+      state.applyingDuck = false
+    }
   }
 
   const connectIncomingSources = () => {
@@ -777,15 +795,41 @@
     applyMeetAudioMuting()
   }
 
+  // Safety net: if nothing is actually playing but the duck count is stuck above zero
+  // (a missed restore), release it so Meet's audio never stays lowered for good.
+  const isAnyVoicePlaying = () =>
+    state.clipsPlaying > 0 || Object.values(state.pcmPlayers).some((player) => player && player.active)
+  window.setInterval(() => {
+    if (state.duckCount > 0 && !isAnyVoicePlaying()) {
+      log(`released stuck duck (count ${state.duckCount})`)
+      state.duckCount = 0
+      applyMeetAudioMuting()
+    }
+  }, DUCK_WATCHDOG_MS)
+
+  // Resolves when playback ends, or shortly after it should have, so a clip whose
+  // "ended" event never fires can't block every clip queued behind it.
   const playBuffer = (audioBuffer, destination) =>
     new Promise((resolve) => {
       const source = state.audioCtx.createBufferSource()
       source.buffer = audioBuffer
       source.connect(destination)
-      source.onended = () => {
-        source.disconnect()
+      let settled = false
+      let guard = null
+      const done = (timedOut) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(guard)
+        try {
+          source.disconnect()
+        } catch {
+          // already disconnected
+        }
+        if (timedOut) log("playback end event missing; moving on")
         resolve()
       }
+      source.onended = () => done(false)
+      guard = window.setTimeout(() => done(true), audioBuffer.duration * 1000 + PLAYBACK_END_GRACE_MS)
       source.start(0)
     })
 
@@ -793,22 +837,27 @@
     await resumeAudio()
     const audioBuffer = await state.audioCtx.decodeAudioData(base64ToArrayBuffer(audioBase64))
 
-    if (direction === "outgoing") {
-      post("STATUS", { direction, state: "playing" })
-      await playBuffer(audioBuffer, state.virtualMicDest)
-      post("STATUS", { direction, state: "played" })
-      return
-    }
-
-    // Ducking also gates outgoing hands-free, so Bangla leaking from speakers
-    // into the mic is never re-translated and sent to the meeting.
-    duckMeetAudio()
+    state.clipsPlaying += 1
     try {
-      post("STATUS", { direction, state: "playing" })
-      await playBuffer(audioBuffer, state.audioCtx.destination)
-      post("STATUS", { direction, state: "played" })
+      if (direction === "outgoing") {
+        post("STATUS", { direction, state: "playing" })
+        await playBuffer(audioBuffer, state.virtualMicDest)
+        post("STATUS", { direction, state: "played" })
+        return
+      }
+
+      // Ducking also gates outgoing hands-free, so Bangla leaking from speakers
+      // into the mic is never re-translated and sent to the meeting.
+      duckMeetAudio()
+      try {
+        post("STATUS", { direction, state: "playing" })
+        await playBuffer(audioBuffer, state.audioCtx.destination)
+        post("STATUS", { direction, state: "played" })
+      } finally {
+        restoreMeetAudio()
+      }
     } finally {
-      restoreMeetAudio()
+      state.clipsPlaying = Math.max(0, state.clipsPlaying - 1)
     }
   }
 

@@ -143,6 +143,10 @@ const REALTIME_PORTS = {
 }
 const WS_CONNECT_TIMEOUT_MS = 8_000
 const MAX_QUEUED_MESSAGES = 100
+// A half-open socket (Wi-Fi switch, laptop sleep, backend hung) looks connected but carries
+// nothing. The backend answers every ping, so silence means the link is dead.
+const HEARTBEAT_INTERVAL_MS = 10_000
+const HEARTBEAT_TIMEOUT_MS = 25_000
 
 const buildRealtimeSocketUrl = (backendUrl, path, targetLang, apiToken) => {
   const url = new URL(`${backendUrl.replace(/\/+$/, "")}${path}`)
@@ -158,6 +162,8 @@ const handleRealtimePort = (port, route) => {
   let opened = false
   let closed = false
   let connectTimer = null
+  let heartbeatTimer = null
+  let lastInboundAt = Date.now()
   const queue = []
 
   const postToPage = (message) => {
@@ -169,12 +175,15 @@ const handleRealtimePort = (port, route) => {
     }
   }
 
-  const shutdown = (reason, error) => {
+  // retryable: the page should reconnect on its own (network/backend trouble), as opposed
+  // to a fatal rejection such as a bad key or token where retrying cannot help.
+  const shutdown = (reason, error, retryable = false) => {
     if (closed) return
-    if (error) postToPage({ type: "error", message: error, fatal: true })
+    if (error) postToPage({ type: "error", message: error, fatal: true, retryable })
     postToPage({ type: "closed", reason })
     closed = true
     clearTimeout(connectTimer)
+    clearInterval(heartbeatTimer)
     try {
       ws?.close()
     } catch {
@@ -208,18 +217,34 @@ const handleRealtimePort = (port, route) => {
     }
     ws = new WebSocket(url)
     connectTimer = setTimeout(() => {
-      if (!opened) shutdown("timeout", `Can't reach the backend at ${backendUrl}. Is it running?`)
+      if (!opened) shutdown("timeout", `Can't reach the backend at ${backendUrl}. Is it running?`, true)
     }, WS_CONNECT_TIMEOUT_MS)
 
     ws.onopen = () => {
       opened = true
+      lastInboundAt = Date.now()
       clearTimeout(connectTimer)
       while (queue.length > 0) ws.send(JSON.stringify(queue.shift()))
+      heartbeatTimer = setInterval(() => {
+        if (closed) return
+        if (Date.now() - lastInboundAt > HEARTBEAT_TIMEOUT_MS) {
+          shutdown("stale", "Lost contact with the backend (no response).", true)
+          return
+        }
+        try {
+          ws.send(JSON.stringify({ type: "ping" }))
+        } catch {
+          // onclose follows if the socket is really gone.
+        }
+      }, HEARTBEAT_INTERVAL_MS)
     }
     ws.onmessage = (event) => {
+      lastInboundAt = Date.now()
       if (typeof event.data !== "string") return
       try {
-        postToPage(JSON.parse(event.data))
+        const message = JSON.parse(event.data)
+        if (message.type === "pong") return
+        postToPage(message)
       } catch {
         // Ignore malformed frames.
       }
@@ -229,7 +254,7 @@ const handleRealtimePort = (port, route) => {
     }
     ws.onclose = (event) => {
       if (!opened) {
-        shutdown("unreachable", `Can't reach the live interpreter at ${backendUrl}. Is the backend running and up to date?`)
+        shutdown("unreachable", `Can't reach the live interpreter at ${backendUrl}. Is the backend running and up to date?`, true)
         return
       }
       shutdown(event.reason || "closed")
@@ -255,6 +280,7 @@ const handleRealtimePort = (port, route) => {
   port.onDisconnect.addListener(() => {
     closed = true
     clearTimeout(connectTimer)
+    clearInterval(heartbeatTimer)
     try {
       ws?.close()
     } catch {

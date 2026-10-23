@@ -148,9 +148,8 @@
       onPending(state.speaker, pendingRange(state).text)
     }
 
-    const flushOthers = (current) => {
-      ;[...active].filter((element) => element !== current).forEach(flush)
-    }
+    // Speakers are deliberately independent: a second voice starting must not cut the first
+    // speaker's unfinished sentence in half. Each caption block settles on its own timers.
 
     const isLongEnough = (sentence) =>
       normalize(sentence).text.length >= (CJK.test(sentence) ? MIN_EARLY_SENTENCE_CHARS_CJK : MIN_EARLY_SENTENCE_CHARS)
@@ -184,7 +183,6 @@
 
       const { text } = pendingRange(state)
       if (!hasWords(text)) return
-      flushOthers(element)
       active.add(element)
       onActivity(true)
       onPending(speaker, text)

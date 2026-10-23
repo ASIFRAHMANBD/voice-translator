@@ -61,6 +61,25 @@ const rejectUpgrade = (socket: Duplex, status: number, message: string) => {
   socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
 }
 
+// Dead connections (Wi-Fi switch, sleeping laptop) never send a close frame. Ping every
+// client; one that missed the previous round is terminated, which also ends its paid
+// OpenAI session via the handlers' close listeners.
+const HEARTBEAT_INTERVAL_MS = 15_000
+const PING_MESSAGE = '{"type":"ping"}'
+const PONG_MESSAGE = '{"type":"pong"}'
+const clientAlive = new WeakMap<object, boolean>()
+
+setInterval(() => {
+  for (const client of liveServer.clients) {
+    if (clientAlive.get(client) === false) {
+      client.terminate()
+      continue
+    }
+    clientAlive.set(client, false)
+    client.ping()
+  }
+}, HEARTBEAT_INTERVAL_MS).unref()
+
 const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
   const url = new URL(req.url ?? "/", "http://localhost")
   const isTranscribe = url.pathname === TRANSCRIBE_PATH
@@ -73,6 +92,13 @@ const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
   if (!isTranscribe && !LIVE_TARGET_LANGS.has(target)) return rejectUpgrade(socket, 400, "Bad Request")
 
   liveServer.handleUpgrade(req, socket, head, (client) => {
+    clientAlive.set(client, true)
+    client.on("pong", () => clientAlive.set(client, true))
+    // The extension's own heartbeat: tiny text frames only, audio frames are skipped cheaply.
+    client.on("message", (raw) => {
+      if (!Buffer.isBuffer(raw) || raw.length > PING_MESSAGE.length) return
+      if (raw.toString() === PING_MESSAGE) client.send(PONG_MESSAGE)
+    })
     if (!describeLive().available) {
       client.send(JSON.stringify({
         type: "error",

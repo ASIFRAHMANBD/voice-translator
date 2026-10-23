@@ -52,6 +52,22 @@
   const REALTIME_STOP_FALLBACK_MS = 600
   const REALTIME_CLOSE_TIMEOUT_MS = 10_000
 
+  // Live sockets reconnect on their own after a drop; audio recorded meanwhile is kept
+  // (about 12 s) and replayed, so a brief outage doesn't lose words.
+  const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000]
+  const RECONNECT_MAX_ATTEMPTS = 10
+  const MAX_BUFFERED_FRAMES = 60
+  const LIVE_FRAME_MS = 200
+
+  // A failed translation is retried before it is reported, at most a few run at once,
+  // and one that hangs can't hold up the lines behind it forever.
+  const CLIP_RETRY_DELAYS_MS = [800, 2000]
+  const MAX_INFLIGHT_REQUESTS = 3
+  const CHAIN_WAIT_MS = 20_000
+  // Errors that retrying cannot fix.
+  const NON_RETRYABLE_ERROR =
+    /^(Invalid|Text is missing|Audio clip is too large|Missing audio|Unauthorized|Field |Missing or invalid|Origin not allowed|Extension was reloaded|Send an)/i
+
   const VOICE_RATES = [
     { value: 0.85, label: "Slower" },
     { value: 0.95, label: "Slightly slower" },
@@ -126,6 +142,8 @@
     summary: { status: "idle", text: "" },
     directions: { outgoing: createDirectionState(), incoming: createDirectionState() },
     retryDirection: null,
+    // Lines that came through vs. lines that could not be translated after retrying.
+    stats: { translated: 0, failed: 0 },
   }
 
   // ---------------------------------------------------------------------------
@@ -460,12 +478,12 @@
       }),
       el("label", { className: "mai-check", for: "mai-mute-client" }, [
         muteClientInput,
-        el("span", { text: "Mute client's original voice" }),
+        el("span", { text: "Lower client's original voice" }),
       ]),
       el("p", {
         className: "mai-hint",
         id: "mai-mute-client-hint",
-        text: "Mutes the client's real Japanese/English voice in Google Meet so you only hear the translated Bangla voice.",
+        text: "Turns the client's real Japanese/English voice in Google Meet down to a quiet level (fully silent without headphones), so you mainly hear the translated Bangla but can still tell when they are talking.",
       }),
       el("label", { for: "mai-client-source", className: "mai-field-label", text: "Get the client's words from" }),
       clientSourceSelect,
@@ -617,16 +635,17 @@
 
   const describeLiveIdle = () => {
     const pending = DIRECTIONS.reduce((sum, direction) => sum + state.directions[direction].pending, 0)
-    if (pending > 0) return { message: `Translating… (${pending} in progress)`, tone: "neutral" }
+    const failedNote = state.stats.failed > 0 ? ` ⚠ ${state.stats.failed} line(s) not translated (see the log).` : ""
+    if (pending > 0) return { message: `Translating… (${pending} in progress)${failedNote}`, tone: "neutral" }
     const liveDirections = DIRECTIONS.filter((direction) => state.directions[direction].status === "live")
-    if (liveDirections.length === 0) return { message: "Ready", tone: "neutral" }
+    if (liveDirections.length === 0) return { message: `Ready${failedNote}`, tone: "neutral" }
     const who = liveDirections
       .map((direction) => {
         if (direction !== "outgoing") return state.clientLive ? "the client (Japanese/English auto)" : "the client"
         return state.realtime ? `you (simultaneous → ${LANG_LABELS[state.realtime.targetLang]})` : "you"
       })
       .join(" and ")
-    return { message: `Live: listening to ${who}.`, tone: "neutral" }
+    return { message: `Live: listening to ${who}.${failedNote}`, tone: failedNote ? "warning" : "neutral" }
   }
 
   const refreshLiveStatus = () => {
@@ -744,6 +763,10 @@
     if (!response.ok) {
       directionState.failedClip = clip
       if (!isLive) setDirectionStatus(direction, "error")
+      else {
+        state.stats.failed += 1
+        addFailedEntry(clip, response.error)
+      }
       setStatus(`Couldn't translate: ${response.error}`, "error", direction)
       return
     }
@@ -768,6 +791,7 @@
     }
 
     addEntry(direction, { ...data, target_lang: clip.targetLang, speaker_name: clip.speakerName })
+    state.stats.translated += 1
     recordHistory(direction, data, clip)
     if (!data.audio_base64) {
       if (data.voice_error && clip.speak) {
@@ -812,14 +836,82 @@
     await deliverResponse(clip, response, false)
   }
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  // At most MAX_INFLIGHT_REQUESTS translations run at once. Bursts of short sentences
+  // otherwise trip provider rate limits (HTTP 429), which is how lines used to vanish.
+  let inflightRequests = 0
+  const requestWaiters = []
+  const acquireRequestSlot = () => {
+    if (inflightRequests < MAX_INFLIGHT_REQUESTS) {
+      inflightRequests += 1
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => requestWaiters.push(resolve))
+  }
+  const releaseRequestSlot = () => {
+    const next = requestWaiters.shift()
+    if (next) next() // the slot is handed straight to the next waiter
+    else inflightRequests -= 1
+  }
+
+  const sendWithRetry = async (clip) => {
+    await acquireRequestSlot()
+    try {
+      let response = await sendToBackend(clip)
+      for (const delay of CLIP_RETRY_DELAYS_MS) {
+        if (response.ok || NON_RETRYABLE_ERROR.test(response.error || "")) break
+        await sleep(delay)
+        response = await sendToBackend(clip)
+      }
+      return response
+    } finally {
+      releaseRequestSlot()
+    }
+  }
+
+  // Waits for a clip's result, but not forever: a hung request must not block every line
+  // queued behind it. A late result for an abandoned clip is ignored (Retry resends it).
+  const waitForResponse = (clip, responsePromise) =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        clip.abandoned = true
+        resolve({ ok: false, error: "The translation took too long." })
+      }, CHAIN_WAIT_MS)
+      responsePromise.then((response) => {
+        clearTimeout(timer)
+        if (!clip.abandoned) resolve(response)
+      })
+    })
+
+  // A line that could not be translated stays visible with its original text and a Retry
+  // button, instead of silently disappearing.
+  const addFailedEntry = (clip, error) => {
+    const who = clip.direction === "outgoing" ? "You" : clip.speakerName ? `Client (${clip.speakerName})` : "Client"
+    const retryBtn = el("button", { type: "button", className: "mai-btn mai-btn-secondary mai-entry-retry", text: "Retry" })
+    const article = el("article", { className: `mai-entry mai-entry-${clip.direction} mai-entry-failed` }, [
+      el("p", { className: "mai-entry-meta", text: `${who} · not translated` }),
+      clip.text ? el("p", { className: "mai-entry-source", text: clip.text }) : null,
+      el("p", { className: "mai-entry-unclear", text: `Couldn't translate this line: ${error || "unknown error"}` }),
+      retryBtn,
+    ])
+    retryBtn.addEventListener("click", () => {
+      article.remove()
+      state.stats.failed = Math.max(0, state.stats.failed - 1)
+      enqueueLiveClip(clip)
+    })
+    appendToLog(article)
+  }
+
   // Requests run in parallel; results are shown and played in the order spoken.
   const enqueueLiveClip = (clip) => {
+    clip.abandoned = false
     const directionState = state.directions[clip.direction]
     directionState.pending += 1
     refreshLiveStatus()
-    const responsePromise = sendToBackend(clip)
+    const responsePromise = sendWithRetry(clip)
     directionState.chain = directionState.chain
-      .then(() => responsePromise)
+      .then(() => waitForResponse(clip, responsePromise))
       .then((response) => {
         directionState.pending -= 1
         return deliverResponse(clip, response, true)
@@ -1084,6 +1176,7 @@
       case "ready":
         session.ready = true
         setStatus("Client live listener on. Japanese and English will translate to Bangla.", "success")
+        onLiveReady(session)
         break
       case "status":
         if (message.state === "reconnecting") setStatus("Client listener connection dropped, reconnecting…", "warning")
@@ -1100,28 +1193,140 @@
           enqueueLiveClip(buildTextClip(message.text, "incoming", "", message.lang || ""))
         }
         break
-      case "error":
-        if (message.fatal) session.errorShown = true
-        setStatus(`Client listener: ${message.message || "unknown error"}`, message.fatal ? "error" : "warning")
+      case "error": {
+        const fatal = message.fatal && !message.retryable
+        if (fatal) {
+          session.fatal = true
+          session.errorShown = true
+        }
+        setStatus(`Client listener: ${message.message || "unknown error"}`, fatal ? "error" : "warning")
         break
+      }
       case "closed":
-        finishClientLive(session)
+        handleClientLiveDrop(session)
         break
       default:
         break
     }
   }
 
-  const startClientLive = () => {
+  // ---------------------------------------------------------------------------
+  // Reconnect plumbing shared by the two live sockets: when the link drops without the
+  // user asking, reconnect with backoff and replay the audio recorded in the meantime.
+  // ---------------------------------------------------------------------------
+  const reconnectFields = () => ({
+    port: null,
+    fatal: false,
+    buffered: [],
+    droppedFrames: 0,
+    reconnectAttempts: 0,
+    reconnectTimer: null,
+  })
+
+  const bufferLiveFrame = (session, audio) => {
+    session.buffered.push(audio)
+    if (session.buffered.length > MAX_BUFFERED_FRAMES) {
+      session.buffered.shift()
+      session.droppedFrames += 1
+    }
+  }
+
+  const flushBufferedFrames = (session) => {
+    while (session.buffered.length > 0 && session.port) {
+      try {
+        session.port.postMessage({ type: "audio", audio: session.buffered[0] })
+      } catch {
+        return
+      }
+      session.buffered.shift()
+    }
+  }
+
+  const sendLiveAudio = (session, audio, onDrop) => {
+    if (session.port) {
+      try {
+        session.port.postMessage({ type: "audio", audio })
+        return
+      } catch {
+        onDrop(session)
+      }
+    }
+    bufferLiveFrame(session, audio)
+  }
+
+  // The session is up again: reset the retry counter and say if audio had to be dropped.
+  const onLiveReady = (session) => {
+    session.reconnectAttempts = 0
+    if (session.droppedFrames > 0) {
+      const seconds = Math.max(1, Math.round((session.droppedFrames * LIVE_FRAME_MS) / 1000))
+      setStatus(`Reconnected. About ${seconds}s of audio was lost while offline.`, "warning")
+      session.droppedFrames = 0
+    }
+  }
+
+  const scheduleLiveReconnect = (session, { label, connect, giveUp }) => {
+    if (session.finished || session.reconnectTimer) return
+    session.reconnectAttempts += 1
+    if (session.reconnectAttempts > RECONNECT_MAX_ATTEMPTS) {
+      giveUp(`${label} couldn't reconnect. Press start to try again.`)
+      return
+    }
+    const delay = RECONNECT_BACKOFF_MS[Math.min(session.reconnectAttempts, RECONNECT_BACKOFF_MS.length) - 1]
+    setStatus(`${label} connection lost. Reconnecting (try ${session.reconnectAttempts})…`, "warning")
+    session.reconnectTimer = setTimeout(() => {
+      session.reconnectTimer = null
+      if (session.finished) return
+      if (!connect()) giveUp("Extension was reloaded. Refresh this Meet tab.")
+    }, delay)
+  }
+
+  const connectClientLivePort = (session) => {
     let port
     try {
       port = chrome.runtime.connect({ name: CLIENT_LIVE_PORT_NAME })
     } catch {
-      setStatus("Extension was reloaded. Refresh this Meet tab.", "error")
+      return false
+    }
+    session.port = port
+    port.onMessage.addListener((message) => {
+      if (session.port === port) handleClientLiveMessage(session, message)
+    })
+    port.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError
+      if (session.port === port) handleClientLiveDrop(session)
+    })
+    port.postMessage({ type: "start" })
+    flushBufferedFrames(session)
+    return true
+  }
+
+  const handleClientLiveDrop = (session) => {
+    if (session.finished) return
+    const old = session.port
+    session.port = null
+    try {
+      old?.disconnect()
+    } catch {
+      // Already disconnected.
+    }
+    if (session.stopping) {
+      finishClientLive(session)
       return
     }
+    if (session.fatal) {
+      finishClientLive(session, "Client listener disconnected. Press start to reconnect.")
+      return
+    }
+    scheduleLiveReconnect(session, {
+      label: "Client listener",
+      connect: () => connectClientLivePort(session),
+      giveUp: (message) => finishClientLive(session, message),
+    })
+  }
+
+  const startClientLive = () => {
     const session = {
-      port,
+      ...reconnectFields(),
       ready: false,
       streamStarted: false,
       stopping: false,
@@ -1132,12 +1337,11 @@
       closeTimer: null,
     }
     state.clientLive = session
-    port.onMessage.addListener((message) => handleClientLiveMessage(session, message))
-    port.onDisconnect.addListener(() => {
-      void chrome.runtime.lastError
-      finishClientLive(session, session.stopping ? null : "Client listener disconnected. Press start to reconnect.")
-    })
-    port.postMessage({ type: "start" })
+    if (!connectClientLivePort(session)) {
+      state.clientLive = null
+      setStatus("Extension was reloaded. Refresh this Meet tab.", "error")
+      return
+    }
     postToInject("START_STREAM", { direction: "incoming" })
     setDirectionStatus("incoming", "live")
     setStatus("Connecting live client listener (auto Japanese / English)…")
@@ -1170,6 +1374,7 @@
     session.finished = true
     clearTimeout(session.stopTimer)
     clearTimeout(session.closeTimer)
+    clearTimeout(session.reconnectTimer)
     renderInterim("", "incoming")
     try {
       session.port.disconnect()
@@ -1263,6 +1468,7 @@
           `Live interpreter on. Speak Bangla; the client hears ${LANG_LABELS[session.targetLang]} while you talk.`,
           "success"
         )
+        onLiveReady(session)
         break
       case "status":
         if (message.state === "reconnecting") setStatus("Live interpreter connection dropped, reconnecting…", "warning")
@@ -1279,16 +1485,65 @@
           postToInject("PCM_PLAY", { direction: "outgoing", audioBase64: message.audio, sampleRate: message.sampleRate })
         }
         break
-      case "error":
-        if (message.fatal) session.errorShown = true
-        setStatus(`Live interpreter: ${message.message || "unknown error"}`, message.fatal ? "error" : "warning")
+      case "error": {
+        const fatal = message.fatal && !message.retryable
+        if (fatal) {
+          session.fatal = true
+          session.errorShown = true
+        }
+        setStatus(`Live interpreter: ${message.message || "unknown error"}`, fatal ? "error" : "warning")
         break
+      }
       case "closed":
-        finishRealtime(session)
+        handleRealtimeDrop(session)
         break
       default:
         break
     }
+  }
+
+  const connectRealtimePort = (session) => {
+    let port
+    try {
+      port = chrome.runtime.connect({ name: REALTIME_PORT_NAME })
+    } catch {
+      return false
+    }
+    session.port = port
+    port.onMessage.addListener((message) => {
+      if (session.port === port) handleRealtimeMessage(session, message)
+    })
+    port.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError
+      if (session.port === port) handleRealtimeDrop(session)
+    })
+    port.postMessage({ type: "start", targetLang: session.targetLang })
+    flushBufferedFrames(session)
+    return true
+  }
+
+  const handleRealtimeDrop = (session) => {
+    if (session.finished) return
+    const old = session.port
+    session.port = null
+    try {
+      old?.disconnect()
+    } catch {
+      // Already disconnected.
+    }
+    if (session.stopping) {
+      finishRealtime(session)
+      return
+    }
+    if (session.fatal) {
+      finishRealtime(session, "Live interpreter disconnected. Press start to reconnect.")
+      return
+    }
+    scheduleLiveReconnect(session, {
+      label: "Live interpreter",
+      connect: () => connectRealtimePort(session),
+      giveUp: (message) => finishRealtime(session, message),
+    })
   }
 
   const startRealtime = () => {
@@ -1296,15 +1551,8 @@
       setStatus("Turn on your Google Meet microphone first.", "error")
       return
     }
-    let port
-    try {
-      port = chrome.runtime.connect({ name: REALTIME_PORT_NAME })
-    } catch {
-      setStatus("Extension was reloaded. Refresh this Meet tab.", "error")
-      return
-    }
     const session = {
-      port,
+      ...reconnectFields(),
       targetLang: state.targetLang,
       ready: false,
       streamStarted: false,
@@ -1317,12 +1565,11 @@
       entry: null,
     }
     state.realtime = session
-    port.onMessage.addListener((message) => handleRealtimeMessage(session, message))
-    port.onDisconnect.addListener(() => {
-      void chrome.runtime.lastError
-      finishRealtime(session, session.stopping ? null : "Live interpreter disconnected. Press start to reconnect.")
-    })
-    port.postMessage({ type: "start", targetLang: session.targetLang })
+    if (!connectRealtimePort(session)) {
+      state.realtime = null
+      setStatus("Extension was reloaded. Refresh this Meet tab.", "error")
+      return
+    }
     // Start streaming right away; audio is queued until the interpreter is ready,
     // so the first words are not lost.
     postToInject("START_STREAM", { direction: "outgoing" })
@@ -1359,6 +1606,7 @@
     session.finished = true
     clearTimeout(session.stopTimer)
     clearTimeout(session.closeTimer)
+    clearTimeout(session.reconnectTimer)
     finalizeLiveEntry(session)
     try {
       session.port.disconnect()
@@ -1697,21 +1945,13 @@
       if (direction === "outgoing") {
         const session = state.realtime
         if (!session || session.finished || session.stopSent) return
-        try {
-          session.port.postMessage({ type: "audio", audio: arrayBufferToBase64(msg.buffer) })
-        } catch {
-          finishRealtime(session, "Live interpreter disconnected. Press start to reconnect.")
-        }
+        sendLiveAudio(session, arrayBufferToBase64(msg.buffer), handleRealtimeDrop)
         return
       }
       if (direction === "incoming") {
         const session = state.clientLive
         if (!session || session.finished || session.stopSent) return
-        try {
-          session.port.postMessage({ type: "audio", audio: arrayBufferToBase64(msg.buffer) })
-        } catch {
-          finishClientLive(session, "Client listener disconnected. Press start to reconnect.")
-        }
+        sendLiveAudio(session, arrayBufferToBase64(msg.buffer), handleClientLiveDrop)
         return
       }
       return

@@ -10,6 +10,7 @@ const MAX_SUMMARY_TURNS = 300
 const DIRECTIONS = new Set(["outgoing", "incoming"])
 const TARGET_LANGS = new Set(["ja", "en"])
 const VOICE_LANGS = new Set(["bn", "ja", "en"])
+const VOICES = new Set(["male", "female", "default"])
 
 const getSettings = async () => {
   const { backendUrl, apiToken } = await chrome.storage.local.get(["backendUrl", "apiToken"])
@@ -27,11 +28,14 @@ const isValidText = (text) => typeof text === "string" && text.trim().length > 0
 
 const isValidVoiceRate = (rate) => rate === undefined || (typeof rate === "number" && Number.isFinite(rate))
 
+const isValidVoice = (voice) => voice === undefined || VOICES.has(voice)
+
 const validateVoicePayload = (payload) => {
   if (!payload || typeof payload !== "object") return "Invalid request."
   if (!DIRECTIONS.has(payload.direction)) return "Invalid direction."
   if (!TARGET_LANGS.has(payload.targetLang)) return "Invalid target language."
   if (!isValidVoiceRate(payload.voiceRate)) return "Invalid voice speed."
+  if (!isValidVoice(payload.voice)) return "Invalid voice."
   if (typeof payload.text === "string") return isValidText(payload.text) ? null : "Text is missing or too long."
   if (typeof payload.audioBase64 !== "string" || payload.audioBase64.length === 0) return "Missing audio."
   if (payload.audioBase64.length > MAX_AUDIO_BASE64_LENGTH) return "Audio clip is too large."
@@ -42,6 +46,7 @@ const validateSpeechPayload = (payload) => {
   if (!payload || typeof payload !== "object") return "Invalid request."
   if (!VOICE_LANGS.has(payload.lang)) return "Invalid voice language."
   if (!isValidVoiceRate(payload.voiceRate)) return "Invalid voice speed."
+  if (!isValidVoice(payload.voice)) return "Invalid voice."
   return isValidText(payload.text) ? null : "Text is missing or too long."
 }
 
@@ -97,6 +102,7 @@ const processVoice = (payload) => {
   formData.append("target_lang", payload.targetLang)
   formData.append("tts", payload.speak === false ? "off" : "on")
   if (payload.voiceRate !== undefined) formData.append("voice_rate", String(payload.voiceRate))
+  if (payload.voice !== undefined) formData.append("voice", payload.voice)
   if (Array.isArray(payload.context) && payload.context.length > 0) {
     const context = JSON.stringify(payload.context)
     if (context.length <= MAX_CONTEXT_LENGTH) formData.append("context", context)
@@ -105,7 +111,11 @@ const processVoice = (payload) => {
 }
 
 const synthesize = (payload) =>
-  postJson("/api/tts", { text: payload.text.trim(), lang: payload.lang, voice_rate: payload.voiceRate }, REQUEST_TIMEOUT_MS)
+  postJson(
+    "/api/tts",
+    { text: payload.text.trim(), lang: payload.lang, voice_rate: payload.voiceRate, voice: payload.voice },
+    REQUEST_TIMEOUT_MS
+  )
 
 const summarize = (payload) => postJson("/api/summary", { turns: payload.turns }, SUMMARY_TIMEOUT_MS)
 
@@ -148,11 +158,12 @@ const MAX_QUEUED_MESSAGES = 100
 const HEARTBEAT_INTERVAL_MS = 10_000
 const HEARTBEAT_TIMEOUT_MS = 25_000
 
-const buildRealtimeSocketUrl = (backendUrl, path, targetLang, apiToken) => {
+const buildRealtimeSocketUrl = (backendUrl, path, targetLang, apiToken, voice) => {
   const url = new URL(`${backendUrl.replace(/\/+$/, "")}${path}`)
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
   if (targetLang) url.searchParams.set("target", targetLang)
   if (apiToken) url.searchParams.set("token", apiToken)
+  if (voice && VOICES.has(voice)) url.searchParams.set("voice", voice)
   return url.toString()
 }
 
@@ -205,12 +216,12 @@ const handleRealtimePort = (port, route) => {
     queue.push(message)
   }
 
-  const connect = async (targetLang) => {
+  const connect = async (targetLang, voice) => {
     const { backendUrl, apiToken } = await getSettings()
     if (closed) return
     let url
     try {
-      url = buildRealtimeSocketUrl(backendUrl, route.path, targetLang, apiToken)
+      url = buildRealtimeSocketUrl(backendUrl, route.path, targetLang, apiToken, voice)
     } catch {
       shutdown("bad_url", `Backend URL is invalid: ${backendUrl}`)
       return
@@ -267,11 +278,18 @@ const handleRealtimePort = (port, route) => {
       if (started) return
       started = true
       const targetLang = route.needsTarget ? (TARGET_LANGS.has(message.targetLang) ? message.targetLang : "ja") : ""
-      connect(targetLang)
+      // The live translations service picks its own voice, so the choice travels
+      // as a gender and the backend applies it with our own TTS adapter.
+      const voice = route.needsTarget && VOICES.has(message.voice) ? message.voice : "default"
+      connect(targetLang, voice)
       return
     }
     if (message.type === "audio" && typeof message.audio === "string" && message.audio.length > 0) {
       sendToSocket({ type: "audio", audio: message.audio })
+      return
+    }
+    if (message.type === "voice" && VOICES.has(message.voice)) {
+      sendToSocket({ type: "voice", voice: message.voice })
       return
     }
     if (message.type === "stop") sendToSocket({ type: "stop" })

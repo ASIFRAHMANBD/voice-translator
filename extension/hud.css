@@ -161,6 +161,18 @@
   border-color: var(--mai-warning);
 }
 
+/* Voice picker ------------------------------------------------------------ */
+#meet-ai-hud .mai-voice-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-1);
+  min-width: 0;
+}
+
+#meet-ai-hud .mai-voice-picker .mai-hint {
+  margin: 0;
+}
+
 /* Mode switch ------------------------------------------------------------- */
 #meet-ai-hud .mai-mode {
   margin: 0;

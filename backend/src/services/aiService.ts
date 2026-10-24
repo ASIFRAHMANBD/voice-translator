@@ -13,6 +13,7 @@ import type {
   SummaryTurn,
   TtsAdapter,
   TtsResult,
+  Voice,
 } from "../types.js"
 
 const DEMO_SUMMARY = "বাংলা\nসারাংশ\n• (ডেমো মোড) আসল সারাংশ পেতে DEMO_MODE=false করুন।\n\nEnglish\nSummary\n• (Demo mode) Set DEMO_MODE=false for a real summary."
@@ -115,7 +116,7 @@ export const processVoice = async (request: ProcessVoiceRequest): Promise<Proces
   let voiceError = ""
   if (shouldSpeak) {
     try {
-      speech = await adapters.tts.synthesize(firstSentence, targetLang, { rate: request.voiceRate })
+      speech = await adapters.tts.synthesize(firstSentence, targetLang, { rate: request.voiceRate, voice: request.voice })
     } catch (err) {
       // The text is still useful to the host even when no voice could be made.
       voiceError = err instanceof Error ? err.message : "voice generation failed"
@@ -149,9 +150,9 @@ export const processVoice = async (request: ProcessVoiceRequest): Promise<Proces
 
 export class DemoModeError extends Error {}
 
-export const synthesizeSpeech = async (text: string, lang: string, rate: number): Promise<TtsResult> => {
+export const synthesizeSpeech = async (text: string, lang: string, rate: number, voice: Voice): Promise<TtsResult> => {
   if (!adapters) throw new DemoModeError("Speech synthesis is not available in demo mode")
-  return adapters.tts.synthesize(text, lang, { rate })
+  return adapters.tts.synthesize(text, lang, { rate, voice })
 }
 
 export const summarizeMeeting = async (turns: SummaryTurn[]): Promise<string> => {

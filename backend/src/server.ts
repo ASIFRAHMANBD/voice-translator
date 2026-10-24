@@ -5,6 +5,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { WebSocketServer } from "ws"
 import { config } from "./config.js"
 import { isAllowedOrigin, tokensMatch } from "./lib/security.js"
+import { parseVoice } from "./lib/validation.js"
 import { processVoiceRouter } from "./routes/processVoice.js"
 import { speechRouter } from "./routes/speech.js"
 import { describeProviders } from "./services/aiService.js"
@@ -90,6 +91,9 @@ const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
   }
   const target = url.searchParams.get("target") ?? ""
   if (!isTranscribe && !LIVE_TARGET_LANGS.has(target)) return rejectUpgrade(socket, 400, "Bad Request")
+  // The live translations service has no voice parameter, so the gender choice is
+  // applied by our own TTS adapter instead.
+  const voice = parseVoice(url.searchParams.get("voice"))
 
   liveServer.handleUpgrade(req, socket, head, (client) => {
     clientAlive.set(client, true)
@@ -111,7 +115,7 @@ const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       return
     }
     if (isTranscribe) handleTranscribeClient(client)
-    else handleTranslateClient(client, target)
+    else handleTranslateClient(client, target, voice)
   })
 }
 

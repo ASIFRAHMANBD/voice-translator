@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import express, { Router, type Request, type Response } from "express"
 import { ProviderError } from "../lib/http.js"
-import { MAX_TEXT_LENGTH, parseVoiceRate } from "../lib/validation.js"
+import { MAX_TEXT_LENGTH, parseVoice, parseVoiceRate } from "../lib/validation.js"
 import { DemoModeError, summarizeMeeting, synthesizeSpeech } from "../services/aiService.js"
 import type { SummaryTurn } from "../types.js"
 
@@ -43,7 +43,7 @@ const parseSummaryTurns = (raw: unknown): SummaryTurn[] => {
     .filter((turn) => turn.text.length > 0)
 }
 
-// POST /api/tts { text, lang, voice_rate? } -> { audio_base64, audio_mime }
+// POST /api/tts { text, lang, voice_rate?, voice? } -> { audio_base64, audio_mime }
 const handleTts = async (req: Request, res: Response) => {
   const requestId = randomUUID().slice(0, 8)
   const text = cleanString(req.body?.text, MAX_TEXT_LENGTH + 1)
@@ -58,7 +58,7 @@ const handleTts = async (req: Request, res: Response) => {
   }
   try {
     const startedAt = performance.now()
-    const speech = await synthesizeSpeech(text, lang, parseVoiceRate(req.body?.voice_rate))
+    const speech = await synthesizeSpeech(text, lang, parseVoiceRate(req.body?.voice_rate), parseVoice(req.body?.voice))
     console.info(`[${requestId}] tts ${lang} text(${text.length}) ${Math.round(performance.now() - startedAt)}ms`)
     res.json({ audio_base64: speech.audio.toString("base64"), audio_mime: speech.mime })
   } catch (err) {

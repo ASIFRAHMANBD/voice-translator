@@ -55,8 +55,14 @@ export const config = {
     // whisper-1 rejects Bangla ("bn") and garbles it without the hint; gpt-transcribe handles it.
     sttModel: readString("OPENAI_STT_MODEL", "gpt-transcribe"),
     llmModel: readString("OPENAI_LLM_MODEL", "gpt-4.1-mini"),
-    ttsModel: readString("OPENAI_TTS_MODEL", "tts-1"),
+    ttsModel: readString("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
     ttsVoice: readString("OPENAI_TTS_VOICE", "ash"),
+    // Gender voices. gpt-4o-mini-tts has clearly distinct ones; onyx reads
+    // male, coral reads female.
+    ttsVoices: {
+      male: readString("OPENAI_TTS_VOICE_MALE", "onyx"),
+      female: readString("OPENAI_TTS_VOICE_FEMALE", "coral"),
+    } as Record<string, string>,
     ttsInstructions: readString(
       "OPENAI_TTS_INSTRUCTIONS",
       "Speak like a calm, friendly professional in a business meeting. Natural pace, warm tone, clear pronunciation."
@@ -87,14 +93,29 @@ export const config = {
   elevenlabs: {
     apiKey: readString("ELEVENLABS_API_KEY"),
     voiceId: readString("ELEVENLABS_VOICE_ID"),
+    // Gender voices; both default to ELEVENLABS_VOICE_ID so one id still works.
+    voiceIds: {
+      male: readString("ELEVENLABS_VOICE_ID_MALE", readString("ELEVENLABS_VOICE_ID")),
+      female: readString("ELEVENLABS_VOICE_ID_FEMALE", readString("ELEVENLABS_VOICE_ID")),
+    } as Record<string, string>,
     model: readString("ELEVENLABS_MODEL", "eleven_multilingual_v2"),
   },
   edge: {
+    // One male and one female Edge voice per language, for the voice dropdown.
     voices: {
-      bn: readString("EDGE_TTS_VOICE_BN", "bn-BD-NabanitaNeural"),
-      ja: readString("EDGE_TTS_VOICE_JA", "ja-JP-KeitaNeural"),
-      en: readString("EDGE_TTS_VOICE_EN", "en-US-AndrewMultilingualNeural"),
-    } as Record<string, string>,
+      bn: {
+        male: readString("EDGE_TTS_VOICE_BN_MALE", "bn-BD-PradeepNeural"),
+        female: readString("EDGE_TTS_VOICE_BN_FEMALE", "bn-BD-NabanitaNeural"),
+      } as Record<string, string>,
+      ja: {
+        male: readString("EDGE_TTS_VOICE_JA_MALE", "ja-JP-KeitaNeural"),
+        female: readString("EDGE_TTS_VOICE_JA_FEMALE", "ja-JP-NanamiNeural"),
+      } as Record<string, string>,
+      en: {
+        male: readString("EDGE_TTS_VOICE_EN_MALE", "en-US-AndrewMultilingualNeural"),
+        female: readString("EDGE_TTS_VOICE_EN_FEMALE", "en-US-AvaMultilingualNeural"),
+      } as Record<string, string>,
+    } as Record<string, Record<string, string>>,
   },
   custom: {
     sttUrl: readString("CUSTOM_STT_URL"),

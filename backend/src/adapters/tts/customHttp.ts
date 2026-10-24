@@ -4,18 +4,19 @@ import type { TtsAdapter } from "../../types.js"
 
 type CustomTtsJson = { audio_base64?: string; mime?: string }
 
-// Contract: POST JSON { text, lang, rate } -> raw audio bytes (audio/* content type)
-// or JSON { audio_base64, mime }. rate: 1 = normal speed.
+// Contract: POST JSON { text, lang, rate, voice } -> raw audio bytes (audio/* content type)
+// or JSON { audio_base64, mime }. rate: 1 = normal speed. voice: male | female | default.
 export const createCustomHttpTts = (config: AppConfig): TtsAdapter => {
   const url = requireValue(config.custom.ttsUrl, "CUSTOM_TTS_URL", "custom")
 
   return {
     name: "custom-tts",
-    synthesize: async (text, lang, { rate = 1 } = {}) => {
+    supportsGender: true,
+    synthesize: async (text, lang, { rate = 1, voice = "default" } = {}) => {
       const res = await providerFetch("custom-tts", url, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...bearer(config.custom.ttsKey) },
-        body: JSON.stringify({ text, lang, rate }),
+        body: JSON.stringify({ text, lang, rate, voice }),
       })
       const contentType = res.headers.get("content-type") ?? ""
 

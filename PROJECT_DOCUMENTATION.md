@@ -106,6 +106,7 @@ Failed requests in either mode show the error with a **Retry** link that resends
 - `STT_GLOSSARY` lists names and terms (people, company, product, tech words). Whisper uses it, plus the speaker's previous sentence, as a spelling hint, and the translator treats them as known names.
 - **Settings → Get the client's words from**: `Meet captions` (default) reads Meet's own live captions instead of sending meeting audio to Whisper. This is more accurate, shows the speaker's name, and handles several client speakers. Turn on **CC** in Meet and set the caption language to the client's language (Japanese or English). If no captions are found within 3 seconds, the panel says so. What the client is saying appears live under the buttons. Each sentence is sent about 0.4 s after Meet ends it with punctuation, even while the client keeps talking; unpunctuated speech is sent after the pause setting plus 0.3 s. Captions are used in hands-free mode only; push-to-talk always uses Whisper. Selectors live at the top of `extension/captions.js`, and need updating if Meet changes its markup.
 - **Long translations** are spoken sentence by sentence. The first sentence's voice arrives with the translation, and the rest are synthesized in parallel and played in order, so a long answer starts about as soon as a short one.
+- **Voice** (Default, Male, Female), the dropdown above the Hands-free / Push-to-talk buttons, picks the voice the translated speech uses, in both directions. The choice is stored, so the same voice is used for the whole meeting. Edge, OpenAI, ElevenLabs and the live interpreter honor it. The Google Translate fallback has no voice parameter, so it is skipped when a gender is picked and OpenAI TTS takes over instead; if no provider can speak the chosen gender, the live interpreter says so and falls back to the service voice rather than speaking with the wrong one. Changing it applies from the next sentence, including in a running live interpreter session.
 - **Settings → Voice speed** (Slower, Slightly slower, Normal, Faster) applies to both voices. Edge, OpenAI and ElevenLabs honor it; the Google Translate fallback voice always speaks at normal speed.
 - **Summarize meeting** turns this tab's translations (up to the last 300) into minutes in Bangla then English: summary, decisions, action items, client requests, open questions. Copy or download it as a `.txt` file. History is kept in tab memory only and is lost on refresh, so summarize before leaving the call.
 
@@ -151,11 +152,15 @@ Both outgoing and incoming audio operate completely hands-free with high speed a
    - **Decoupled Analysis:** Conversational analysis runs in the background in parallel and never blocks the translated speech playback.
 
 ### 1. Paid OpenAI Pipeline & Latency Optimization
-- **Official OpenAI Stack:** paid OpenAI endpoints: `gpt-transcribe` for Bangla STT (was `whisper-1`, which can't do Bangla), `gpt-4o-mini` for translation/reasoning, `tts-1` for audio synthesis, and `gpt-realtime-translate` for the live interpreter.
+- **Official OpenAI Stack:** paid OpenAI endpoints: `gpt-transcribe` for Bangla STT (was `whisper-1`, which can't do Bangla), `gpt-4o-mini` for translation/reasoning, `gpt-4o-mini-tts` for audio synthesis, and `gpt-realtime-translate` for the live interpreter.
 - **TTS Latency Breakthrough (12.2s → 1.6s):**
   - Replaced the conversational audio model `gpt-4o-mini-tts` (which had a high ~12.2-second generation latency) with OpenAI's dedicated low-latency `tts-1` model (`voice: ash`).
   - Audio generation time dropped from **12,200 ms down to ~1,600 ms** for natural Japanese speech.
 - **Configuration Defaults:** Updated `backend/src/config.ts` and `backend/.env` to default to `OPENAI_TTS_MODEL=tts-1`, `OPENAI_TTS_VOICE=ash`, and `TTS_PROVIDER_JA=openai`.
+- **Distinct Male/Female Voices:** `tts-1`'s `onyx` (male) and `shimmer` (female) sound too alike to tell apart, so the Voice dropdown's "Female" option was indistinguishable from "Male". Switched the OpenAI TTS model back to `gpt-4o-mini-tts`, whose voices are clearly separated (`onyx` male, `coral` female), and the adapter now appends an explicit gender instruction to the configured tone so the model reinforces the intended gender:
+  - `OPENAI_TTS_MODEL=gpt-4o-mini-tts`, `OPENAI_TTS_VOICE_MALE=onyx`, `OPENAI_TTS_VOICE_FEMALE=coral`.
+  - `backend/src/adapters/tts/openai.ts` — `GENDER_INSTRUCTIONS` + `buildInstructions(voice)`; the gender wording is only added on the `gpt-4o*` models, since `tts-1` rejects the `instructions` field.
+  - Trade-off: `gpt-4o-mini-tts` is slower than `tts-1`. Raise `OPENAI_TTS_MODEL=tts-1` if latency matters more than the gender difference.
 
 ### 2. Whisper Bengali Speech-to-Text (STT) Enhancements
 - **OpenAI HTTP 400 Fix for Bengali (`bn`):**
@@ -204,11 +209,14 @@ See [`backend/.env.example`](backend/.env.example) for the full list with defaul
 | `DEMO_MODE` | `true` returns canned text and a chime sound, with no providers called |
 | `STT_PROVIDER` | `openai`, `groq`, `deepgram`, `custom` |
 | `LLM_PROVIDER` | `openai`, `gemini`, `openai-compatible` (aliases `vllm`, `custom`) |
-| `TTS_PROVIDER` | `openai`, `elevenlabs`, `edge`, `custom` |
-| `TTS_FALLBACK_PROVIDER` | Backup voice used when the main one fails, default `google-translate` (free, unofficial, plainer voice); `none` disables it. After an HTTP 429 the main voice is skipped for 60 s. If every voice fails, the response still carries the text, with `voice_error` set |
+| `TTS_PROVIDER` | `openai`, `elevenlabs`, `edge`, `google-translate`, `custom` |
+| `TTS_FALLBACK_PROVIDER` | Backup voice used when the main one fails, default `google-translate` (free, unofficial, plainer voice); `none` disables it. After an HTTP 429 the main voice is skipped for 60 s. If every voice fails, the response still carries the text, with `voice_error` set. `google-translate` has no voice parameter, so it is **skipped** when a male/female voice was asked for; OpenAI TTS is used instead (when `OPENAI_API_KEY` is set), so the chosen gender is never silently dropped |
 | `TTS_PROVIDER_BN` / `_JA` / `_EN` | Optional per-language override, e.g. `TTS_PROVIDER_JA=openai` for a paid Japanese voice while Bangla stays on `edge` |
-| `EDGE_TTS_VOICE_JA` / `_EN` / `_BN` | Edge voice names. Defaults: `ja-JP-KeitaNeural`, `en-US-AndrewMultilingualNeural`, `bn-BD-NabanitaNeural` |
-| `OPENAI_TTS_INSTRUCTIONS` | Speaking style for `gpt-4o-mini-tts` (calm, friendly professional by default) |
+| `EDGE_TTS_VOICE_JA_MALE` / `_FEMALE` / `_EN_MALE` / `_EN_FEMALE` / `_BN_MALE` / `_BN_FEMALE` | Edge voice names for the Voice dropdown. Defaults: `ja-JP-KeitaNeural` / `ja-JP-NanamiNeural`, `en-US-AndrewMultilingualNeural` / `en-US-AvaMultilingualNeural`, `bn-BD-PradeepNeural` / `bn-BD-NabanitaNeural` |
+| `OPENAI_TTS_MODEL` | OpenAI TTS model. Default `gpt-4o-mini-tts`, whose male/female voices are clearly distinct. Set `tts-1` for lower latency, but its `onyx`/`shimmer` voices sound too alike to tell apart |
+| `OPENAI_TTS_VOICE_MALE` / `_FEMALE` | OpenAI TTS voice names for the Voice dropdown. Defaults: `onyx` / `coral` |
+| `ELEVENLABS_VOICE_ID_MALE` / `_FEMALE` | ElevenLabs voice ids for the Voice dropdown. Both default to `ELEVENLABS_VOICE_ID` |
+| `OPENAI_TTS_INSTRUCTIONS` | Speaking style for `gpt-4o-mini-tts` (calm, friendly professional by default). The selected gender is appended automatically |
 | `CUSTOM_LLM_REASONING_EFFORT` | `low`, `medium`, `high` for reasoning models such as `openai/gpt-oss-120b`; `low` is about 0.3 s faster |
 | `STT_GLOSSARY` | Names and terms speech recognition should spell correctly |
 | `API_TOKEN` | Optional bearer token, checked in constant time |
@@ -225,29 +233,35 @@ An unknown provider name or a missing required key stops the server at startup w
 
 - **STT** (`STT_PROVIDER=custom`): `POST CUSTOM_STT_URL`, multipart `audio` (+ `language` for Bangla), returns JSON `{ "text": "...", "lang": "ja" }`. An OpenAI-compatible Whisper server (faster-whisper-server, speaches) can instead use `STT_PROVIDER=openai` with `OPENAI_BASE_URL` pointed at it.
 - **LLM** (`LLM_PROVIDER=vllm`): `CUSTOM_LLM_URL=http://host:8000/v1`, `CUSTOM_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct`. Set `CUSTOM_LLM_JSON_MODE=false` if the server rejects `response_format`.
-- **TTS** (`TTS_PROVIDER=custom`): `POST CUSTOM_TTS_URL`, JSON `{ "text", "lang", "rate" }` (`rate` 1 is normal speed), returns `audio/*` bytes or JSON `{ "audio_base64", "mime" }`.
+- **TTS** (`TTS_PROVIDER=custom`): `POST CUSTOM_TTS_URL`, JSON `{ "text", "lang", "rate", "voice" }` (`rate` 1 is normal speed, `voice` is `male` / `female` / `default`), returns `audio/*` bytes or JSON `{ "audio_base64", "mime" }`.
 
 ### API contract
 
-`POST /api/process-voice` (multipart): `audio` (file) or `text` (already recognized speech, up to 1000 characters; skips STT), `direction` (`outgoing` or `incoming`), `target_lang` (`ja` or `en`, used for outgoing), optional `tts` (`off` skips speech; `audio_base64` is then empty), optional `voice_rate` (0.7–1.3, default 1), optional `context` (JSON `[{ "speaker": "host" | "client", "text": "..." }]`, last 6 turns, 300 characters each; malformed values are ignored).
+`POST /api/process-voice` (multipart): `audio` (file) or `text` (already recognized speech, up to 1000 characters; skips STT), `direction` (`outgoing` or `incoming`), `target_lang` (`ja` or `en`, used for outgoing), optional `tts` (`off` skips speech; `audio_base64` is then empty), optional `voice_rate` (0.7–1.3, default 1), optional `voice` (`male`, `female` or `default`; anything else is treated as `default`), optional `context` (JSON `[{ "speaker": "host" | "client", "text": "..." }]`, last 6 turns, 300 characters each; malformed values are ignored).
 
 `audio_base64` holds the first sentence only. `remaining_sentences` lists the rest, to be fetched with `/api/tts` in `voice_lang` and played in order.
 
-`POST /api/tts` (JSON): `{ "text", "lang": "bn" | "ja" | "en", "voice_rate" }` returns `{ "audio_base64", "audio_mime" }`.
+`POST /api/tts` (JSON): `{ "text", "lang": "bn" | "ja" | "en", "voice_rate", "voice" }` returns `{ "audio_base64", "audio_mime" }`.
 
 `POST /api/summary` (JSON, up to 300 turns): `{ "turns": [{ "speaker": "host" | "client", "name", "text", "translation" }] }` returns `{ "summary": "..." }` as plain text, Bangla first then English. Demo mode returns a fixed sample (`/api/tts` returns 503 there).
 
-`GET /ws/translate?target=ja|en&token=…` (WebSocket, live interpreter; same origin and token checks as the HTTP API):
+`GET /ws/translate?target=ja|en&voice=male|female|default&token=…` (WebSocket, live interpreter; same origin and token checks as the HTTP API):
 - **Client → server:**
   - `{ "type": "audio", "audio": base64 }`: 24 kHz mono PCM16, 200 ms frames, sent continuously including silence.
+  - `{ "type": "voice", "voice": "male" | "female" | "default" }`: changes the voice mid-session.
   - `{ "type": "stop" }`
 - **Server → client:**
   - `ready`
   - `status` (`reconnecting` / `connected`)
   - `source_delta` and `translation_delta` (`delta`, append-only text)
   - `audio` (`audio` base64 PCM16, `sampleRate`)
+  - `synth` (`audio` base64 MP3, `mime`): sent instead of `audio` when a voice is picked (see below)
   - `error` (`message`, `fatal`)
   - `closed` (`reason`)
+- The live translations service has no voice parameter, so `voice=male` / `voice=female` makes the
+  backend speak the translated text with its own TTS adapter (sentence by sentence) and drop the
+  service's audio. `voice=default` keeps the service's audio, which is lower latency. A `voice`
+  message switches over mid-session, from the next sentence.
 - `/health` reports `live.available`.
 
 ```json

@@ -75,6 +75,13 @@
     { value: 1.1, label: "Faster" },
   ]
   const DEFAULT_VOICE_RATE = 1
+  // Which voice the translated speech uses. "default" leaves the choice to the backend.
+  const VOICES = [
+    { value: "default", label: "Default" },
+    { value: "male", label: "Male" },
+    { value: "female", label: "Female" },
+  ]
+  const DEFAULT_VOICE = "default"
   // live = OpenAI live transcription of the meeting audio (auto Japanese/English).
   const CLIENT_SOURCES = ["live", "captions", "whisper"]
   const Captions = window.__meetAiCaptions
@@ -126,6 +133,7 @@
     collapsed: false,
     speakBangla: true,
     voiceRate: DEFAULT_VOICE_RATE,
+    voice: DEFAULT_VOICE,
     engine: DEFAULT_ENGINE,
     clientSource: DEFAULT_CLIENT_SOURCE,
     speech: null,
@@ -243,6 +251,25 @@
     return { fieldset, radios, hint }
   }
 
+  // The voice picker sits above the mode switch so it is reachable without
+  // opening Settings, and stays put for the whole meeting.
+  const buildVoicePicker = () => {
+    const label = el("label", { className: "mai-visually-hidden", for: "mai-voice", text: "Voice" })
+    const select = el(
+      "select",
+      { id: "mai-voice", className: "mai-select mai-select-block", "aria-describedby": "mai-voice-hint" },
+      VOICES.map(({ value, label: text }) => el("option", { value, text }))
+    )
+    select.addEventListener("change", handleVoiceChange)
+    const hint = el("p", {
+      className: "mai-hint",
+      id: "mai-voice-hint",
+      text: "Male or female voice for the translation, in both directions.",
+    })
+    ui.voiceSelect = select
+    return el("div", { className: "mai-voice-picker" }, [label, select, hint])
+  }
+
   const buildHud = () => {
     const title = el("h2", { className: "mai-title", id: "mai-title", text: "AI Interpreter" })
 
@@ -309,9 +336,11 @@
 
     const summary = buildSummary()
     const settings = buildSettings()
+    const voicePicker = buildVoicePicker()
 
     const body = el("div", { id: "mai-body", className: "mai-body" }, [
       mic,
+      voicePicker,
       modeSwitch.fieldset,
       modeSwitch.hint,
       el("div", { className: "mai-actions" }, [conversation.button, speak.button, listen.button]),
@@ -731,8 +760,8 @@
   // The response carries audio for the first sentence only. The rest is requested
   // right away and queued in order behind it, so playback starts early and has no gaps
   // as long as each sentence is ready before the previous one finishes.
-  const playRemainingSentences = async (direction, sentences, lang, voiceRate) => {
-    const requests = sentences.map((text) => sendToBackground("SYNTHESIZE", { text, lang, voiceRate }))
+  const playRemainingSentences = async (direction, sentences, lang, voiceRate, voice) => {
+    const requests = sentences.map((text) => sendToBackground("SYNTHESIZE", { text, lang, voiceRate, voice }))
     for (const request of requests) {
       const response = await request
       if (!response.ok || !response.data?.audio_base64) {
@@ -817,7 +846,13 @@
     )
     const remaining = Array.isArray(data.remaining_sentences) ? data.remaining_sentences : []
     if (remaining.length > 0) {
-      await playRemainingSentences(direction, remaining, data.voice_lang || (direction === "outgoing" ? clip.targetLang : "bn"), clip.voiceRate)
+      await playRemainingSentences(
+        direction,
+        remaining,
+        data.voice_lang || (direction === "outgoing" ? clip.targetLang : "bn"),
+        clip.voiceRate,
+        clip.voice
+      )
     }
   }
 
@@ -937,6 +972,7 @@
     context: state.recentTurns.slice(),
     speak: direction === "outgoing" || state.speakBangla,
     voiceRate: state.voiceRate,
+    voice: state.voice,
   })
 
   const renderInterim = (text, direction = "outgoing", speakerName = "") => {
@@ -1485,6 +1521,13 @@
           postToInject("PCM_PLAY", { direction: "outgoing", audioBase64: message.audio, sampleRate: message.sampleRate })
         }
         break
+      case "synth":
+        // A chosen voice means the backend speaks the translation itself, so the
+        // service's own audio is dropped and this MP3 is played instead.
+        if (typeof message.audio === "string" && message.audio.length > 0) {
+          postToInject("PLAY", { direction: "outgoing", audioBase64: message.audio })
+        }
+        break
       case "error": {
         const fatal = message.fatal && !message.retryable
         if (fatal) {
@@ -1517,7 +1560,7 @@
       void chrome.runtime.lastError
       if (session.port === port) handleRealtimeDrop(session)
     })
-    port.postMessage({ type: "start", targetLang: session.targetLang })
+    port.postMessage({ type: "start", targetLang: session.targetLang, voice: state.voice })
     flushBufferedFrames(session)
     return true
   }
@@ -1789,6 +1832,22 @@
     storageSet({ voiceRate: state.voiceRate })
   }
 
+  const handleVoiceChange = (event) => {
+    const value = event.target.value
+    state.voice = VOICES.some((option) => option.value === value) ? value : DEFAULT_VOICE
+    event.target.value = state.voice
+    storageSet({ voice: state.voice })
+    // A running live interpreter can switch voice mid-sentence.
+    if (state.realtime) {
+      try {
+        state.realtime.port?.postMessage({ type: "voice", voice: state.voice })
+      } catch {
+        // The port is gone; the next session picks the voice up.
+      }
+      setStatus(`Voice set to ${state.voice}. The live interpreter uses it from the next sentence.`, "success")
+    }
+  }
+
   const handleClientSourceChange = (event) => {
     const source = event.target.value
     state.clientSource = CLIENT_SOURCES.includes(source) && (source !== "captions" || Captions) ? source : DEFAULT_CLIENT_SOURCE
@@ -1988,6 +2047,7 @@
         context: state.recentTurns.slice(),
         speak: direction === "outgoing" || state.speakBangla,
         voiceRate: state.voiceRate,
+        voice: state.voice,
       }
       if (msg.mode === "vad") {
         enqueueLiveClip(clip)
@@ -2051,7 +2111,7 @@
     buildHud()
 
     const saved = await storageGet([
-      "targetLang", "collapsed", "position", "mode", "silenceMs", "speakBangla", ENGINE_STORAGE_KEY, "voiceRate", CLIENT_SOURCE_STORAGE_KEY, "clientSource",
+      "targetLang", "collapsed", "position", "mode", "silenceMs", "speakBangla", ENGINE_STORAGE_KEY, "voiceRate", "voice", CLIENT_SOURCE_STORAGE_KEY, "clientSource",
       "headphones", "muteClientOriginal",
     ])
     state.targetLang = saved.targetLang === "en" ? "en" : "ja"
@@ -2064,6 +2124,7 @@
     state.headphones = saved.headphones !== false
     state.muteClientOriginal = saved.muteClientOriginal !== false
     state.voiceRate = VOICE_RATES.some((option) => option.value === saved.voiceRate) ? saved.voiceRate : DEFAULT_VOICE_RATE
+    state.voice = VOICES.some((option) => option.value === saved.voice) ? saved.voice : DEFAULT_VOICE
     const savedClientSource = saved[CLIENT_SOURCE_STORAGE_KEY] || saved.clientSource
     state.clientSource = CLIENT_SOURCES.includes(savedClientSource) && (savedClientSource !== "captions" || Captions)
       ? savedClientSource
@@ -2076,6 +2137,7 @@
     ui.headphonesInput.checked = state.headphones
     ui.muteClientInput.checked = state.muteClientOriginal
     ui.voiceRateSelect.value = String(state.voiceRate)
+    ui.voiceSelect.value = state.voice
     ui.clientSourceSelect.value = state.clientSource
     renderSummaryButton()
     renderAll()

@@ -1,6 +1,8 @@
 export type Direction = "outgoing" | "incoming"
 export type TargetLang = "ja" | "en"
 export type Speaker = "host" | "client"
+// Which voice to speak with. "default" leaves the choice to the provider.
+export type Voice = "male" | "female" | "default"
 
 export type ConversationTurn = { speaker: Speaker; text: string }
 
@@ -22,7 +24,8 @@ export type SummaryTurn = { speaker: Speaker; name: string; text: string; transl
 export type SummaryInput = { turns: SummaryTurn[]; glossary?: string }
 
 // rate: 1 = normal, 0.9 = 10% slower.
-export type TtsOptions = { rate?: number }
+// voice: "male" | "female" picks a gender voice; "default" keeps the provider's own voice.
+export type TtsOptions = { rate?: number; voice?: Voice }
 export type TtsResult = { audio: Buffer; mime: string }
 
 export type SttAdapter = {
@@ -38,6 +41,10 @@ export type LlmAdapter = {
 }
 export type TtsAdapter = {
   name: string
+  // False when the provider has no voice parameter, so a male/female choice
+  // cannot be honoured by it. Such a provider must not be used as a fallback
+  // for a request that asks for a gender.
+  supportsGender?: boolean
   synthesize: (text: string, lang: string, options?: TtsOptions) => Promise<TtsResult>
 }
 
@@ -52,6 +59,7 @@ export type ProcessVoiceRequest = {
   context: ConversationTurn[]
   speak: boolean
   voiceRate: number
+  voice: Voice
 }
 
 export type StageTimings = { stt_ms: number; llm_ms: number; tts_ms: number; total_ms: number }

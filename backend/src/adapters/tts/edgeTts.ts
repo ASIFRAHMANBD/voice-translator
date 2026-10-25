@@ -1,7 +1,7 @@
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts"
 import type { AppConfig } from "../../config.js"
 import { ProviderError } from "../../lib/http.js"
-import type { TtsAdapter } from "../../types.js"
+import type { TtsAdapter, Voice } from "../../types.js"
 
 const OUTPUT = OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3
 // A reused socket that went stale hangs instead of failing, so give it a short
@@ -80,15 +80,24 @@ export const createEdgeTts = (config: AppConfig): TtsAdapter => {
     }
   }
 
+  // "default" keeps the provider's own voice: female first, then male.
+  const pickVoice = (lang: string, voice: Voice): string | undefined => {
+    const perLang = config.edge.voices[lang]
+    if (!perLang) return undefined
+    if (voice === "male" || voice === "female") return perLang[voice]
+    return perLang.female ?? perLang.male
+  }
+
   return {
     name: "edge-tts",
-    synthesize: async (text, lang, { rate = 1 } = {}) => {
-      const voice = config.edge.voices[lang]
-      if (!voice) throw new ProviderError("edge-tts", `No voice configured for language "${lang}"`)
+    supportsGender: true,
+    synthesize: async (text, lang, { rate = 1, voice = "default" } = {}) => {
+      const voiceName = pickVoice(lang, voice)
+      if (!voiceName) throw new ProviderError("edge-tts", `No voice configured for language "${lang}"`)
 
-      const previous = queues.get(voice) ?? Promise.resolve()
-      const job = previous.catch(() => {}).then(() => synthesizeWithRetry(voice, text, rate))
-      queues.set(voice, job)
+      const previous = queues.get(voiceName) ?? Promise.resolve()
+      const job = previous.catch(() => {}).then(() => synthesizeWithRetry(voiceName, text, rate))
+      queues.set(voiceName, job)
       try {
         return { audio: await job, mime: "audio/mpeg" }
       } catch (err) {

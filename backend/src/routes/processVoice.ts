@@ -3,7 +3,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import multer from "multer"
 import { config } from "../config.js"
 import { ProviderError } from "../lib/http.js"
-import { MAX_TEXT_LENGTH, parseVoiceRate } from "../lib/validation.js"
+import { MAX_TEXT_LENGTH, parseVoice, parseVoiceRate } from "../lib/validation.js"
 import { processVoice } from "../services/aiService.js"
 import type { ConversationTurn, Direction, TargetLang } from "../types.js"
 
@@ -15,7 +15,8 @@ const MAX_CONTEXT_TEXT = 300
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: config.maxUploadBytes, files: 1, fields: 8, fieldSize: 16 * 1024 },
+  // Fields: audio, text, lang, direction, target_lang, tts, voice_rate, voice, context.
+  limits: { fileSize: config.maxUploadBytes, files: 1, fields: 9, fieldSize: 16 * 1024 },
   fileFilter: (_req, file, cb) => cb(null, ACCEPTED_MIME.test(file.mimetype)),
 })
 
@@ -87,6 +88,7 @@ const handleProcessVoice = async (req: Request, res: Response) => {
       context: parseContext(req.body?.context),
       speak: req.body?.tts !== "off",
       voiceRate: parseVoiceRate(req.body?.voice_rate),
+      voice: parseVoice(req.body?.voice),
     })
     const { stt_ms, llm_ms, tts_ms, total_ms } = result.timings
     console.info(

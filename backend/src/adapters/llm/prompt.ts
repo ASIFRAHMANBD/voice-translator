@@ -91,12 +91,14 @@ export const buildSummaryMessages = ({ turns, glossary }: SummaryInput) => {
     glossary ? `Known names and terms: ${glossary}` : "",
     "Write plain text, no markdown tables or bold. Write two versions of the same minutes: first Bangla, then English.",
     "Start the Bangla version with the line \"বাংলা\" and the English one with the line \"English\".",
+    "Several people may speak in the same meeting. Keep the speaker's name on every point: say \"<name> said ...\" or \"<name> asked ...\" so the host knows who said what. Never merge two people's points into one.",
     "Each version has these headings, in this order, each followed by short \"• \" bullet points (write \"None\"/\"নেই\" when empty):",
     "Summary (2-3 sentences) / সারাংশ",
     "Decisions / সিদ্ধান্ত",
     "Action items: who, what, and by when if mentioned / করণীয়",
     "Client requests and concerns / ক্লায়েন্টের চাওয়া ও উদ্বেগ",
     "Open questions / খোলা প্রশ্ন",
+    "What each person said / কে কী বলেছেন",
   ]
     .filter(Boolean)
     .join("\n")

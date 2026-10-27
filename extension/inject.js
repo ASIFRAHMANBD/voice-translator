@@ -63,6 +63,10 @@
     realMicStream: null,
     liveVirtualTracks: new Set(),
     meetMuted: false,
+    // When the host presses Stop, Meet must get the real microphone back so the
+    // meeting returns to normal audio. The passthrough copies the real mic into
+    // the virtual mic that Meet already holds.
+    passthrough: false,
     recorders: { outgoing: null, incoming: null },
     live: { outgoing: null, incoming: null },
     streams: { outgoing: null, incoming: null },
@@ -75,6 +79,12 @@
     muteClientOriginal: true,
     incomingActive: false,
     incoming: { bus: null, dest: null, sources: new Map(), observer: null, rescanTimer: null, users: 0 },
+    // Remote participants are tracked separately so the client-side text can say
+    // who is speaking when several people talk at once.
+    participants: new Map(),
+    participantCounter: 0,
+    // Per-participant level meters, used to find out who is talking.
+    speakerDetectors: new Map(),
     playQueues: { outgoing: Promise.resolve(), incoming: Promise.resolve() },
     duckCount: 0,
     duckedVolumes: new Map(),
@@ -151,6 +161,32 @@
 
   const isOutgoingCaptureActive = () =>
     state.recorders.outgoing?.state === "recording" || Boolean(state.live.outgoing) || Boolean(state.streams.outgoing)
+
+  // Copies the real microphone into the virtual mic that Meet is holding, so the
+  // meeting hears the host again after the interpreter is stopped.
+  const startPassthrough = () => {
+    if (state.passthrough) return
+    if (!state.realMicStream || !state.audioCtx) return
+    try {
+      const source = state.audioCtx.createMediaStreamSource(state.realMicStream)
+      source.connect(state.virtualMicDest)
+      state.passthrough = source
+      log("passthrough on: the real microphone is back in the meeting")
+    } catch (err) {
+      log(`could not start the passthrough: ${err.message}`)
+    }
+  }
+
+  const stopPassthrough = () => {
+    if (!state.passthrough) return
+    try {
+      state.passthrough.disconnect()
+    } catch {
+      // Already disconnected.
+    }
+    state.passthrough = null
+    log("passthrough off")
+  }
 
   const createVirtualTrack = () => {
     ensureAudioGraph()
@@ -299,6 +335,112 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Participants: who is speaking on the client side
+  // ---------------------------------------------------------------------------
+  // Meet's tile markup changes often, so several selectors are tried. A tile
+  // without a readable name still gets a stable label ("Speaker 2").
+  const PARTICIPANT_NAME_SELECTORS = [
+    "[data-meeting-name]",
+    ".Vf9gdf",
+    ".z9Ps1e",
+    ".uM9e1",
+  ]
+
+  const getParticipantTileNames = () => {
+    const names = []
+    const seen = new Set()
+    for (const selector of PARTICIPANT_NAME_SELECTORS) {
+      let nodes = []
+      try {
+        nodes = document.querySelectorAll(selector)
+      } catch {
+        continue
+      }
+      nodes.forEach((node) => {
+        const name = (node.getAttribute?.("data-meeting-name") || node.textContent || "").trim()
+        if (!name || seen.has(name)) return
+        seen.add(name)
+        names.push(name)
+      })
+      if (names.length > 0) return names
+    }
+    return names
+  }
+
+  // Each remote stream gets one stable label, so "Speaker 2" keeps meaning the
+  // same person for the whole meeting.
+  const registerParticipant = (stream, name) => {
+    if (state.participants.has(stream)) {
+      const existing = state.participants.get(stream)
+      if (name && !existing.name) {
+        existing.name = name
+        post("PARTICIPANTS", { participants: listParticipants() })
+      }
+      return existing
+    }
+    state.participantCounter += 1
+    const participant = { name: name || "", id: state.participantCounter, stream }
+    state.participants.set(stream, participant)
+    post("PARTICIPANTS", { participants: listParticipants() })
+    return participant
+  }
+
+  const listParticipants = () =>
+    [...state.participants.values()].map((participant) => ({
+      id: participant.id,
+      name: participant.name || `Speaker ${participant.id}`,
+    }))
+
+  // Watches one participant's audio level. When someone talks louder than the
+  // others, the extension reports that name, so the text can say who said it.
+  const SPEAKER_HANGOVER_MS = 900
+  const SPEAKER_RMS_THRESHOLD = 0.02
+
+  const attachSpeakerDetector = (stream, node) => {
+    if (state.speakerDetectors.has(stream)) return
+    const ctx = state.audioCtx
+    if (!ctx) return
+    try {
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 1024
+      node.connect(analyser)
+      const samples = new Float32Array(analyser.fftSize)
+      const detector = { analyser, samples, lastVoiceAt: 0, speaking: false, level: 0, timer: null }
+      state.speakerDetectors.set(stream, detector)
+
+      detector.timer = window.setInterval(() => {
+        analyser.getFloatTimeDomainData(detector.samples)
+        let sum = 0
+        for (let i = 0; i < detector.samples.length; i++) sum += detector.samples[i] * detector.samples[i]
+        const level = Math.sqrt(sum / detector.samples.length)
+        detector.level = level
+        const now = performance.now()
+        if (level > SPEAKER_RMS_THRESHOLD) detector.lastVoiceAt = now
+        const speaking = now - detector.lastVoiceAt < SPEAKER_HANGOVER_MS
+        if (speaking === detector.speaking) return
+        detector.speaking = speaking
+        reportActiveSpeakers()
+      }, 250)
+    } catch (err) {
+      log(`could not watch the speaker level: ${err.message}`)
+    }
+  }
+
+  // Sends the list of people who are talking right now. The loudest one comes
+  // first, so a single name is enough when only one person speaks.
+  const reportActiveSpeakers = () => {
+    const speaking = []
+    state.participants.forEach((participant, stream) => {
+      const detector = state.speakerDetectors.get(stream)
+      if (!detector || !detector.speaking) return
+      const name = participant.name || `Speaker ${participant.id}`
+      speaking.push({ id: participant.id, name, level: detector.level })
+    })
+    speaking.sort((a, b) => b.level - a.level)
+    post("SPEAKERS", { speakers: speaking.map(({ id, name }) => ({ id, name })) })
+  }
+
   const connectIncomingSources = () => {
     applyMeetAudioMuting()
     const { incoming, audioCtx } = state
@@ -310,8 +452,15 @@
     })
     knownRemoteStreams.forEach((stream) => streams.add(stream))
 
+    // Meet shows one tile per participant. The tile's name lets the text say
+    // who is speaking, so the tiles are matched to the audio streams.
+    const tileNames = getParticipantTileNames()
+    let tileIndex = 0
     streams.forEach((stream) => {
       if (incoming.sources.has(stream)) return
+      const name = tileNames[tileIndex] || ""
+      tileIndex += 1
+      registerParticipant(stream, name)
       if (stream.getAudioTracks().length === 0) {
         stream.addEventListener("addtrack", () => connectIncomingSources(), { once: true })
         return
@@ -320,6 +469,7 @@
         const node = audioCtx.createMediaStreamSource(stream)
         node.connect(incoming.bus)
         incoming.sources.set(stream, node)
+        attachSpeakerDetector(stream, node)
         log(`connected incoming audio track: ${stream.id} (${stream.getAudioTracks().length} tracks)`)
       } catch (err) {
         log(`could not connect media stream source: ${err.message}`)
@@ -355,6 +505,15 @@
     window.clearInterval(incoming.rescanTimer)
     incoming.sources.forEach((node) => node.disconnect())
     incoming.sources.clear()
+    state.speakerDetectors.forEach((detector) => {
+      window.clearInterval(detector.timer)
+      try {
+        detector.analyser.disconnect()
+      } catch {
+        // Already disconnected.
+      }
+    })
+    state.speakerDetectors.clear()
     incoming.bus.disconnect()
     incoming.bus = null
     incoming.dest = null
@@ -892,6 +1051,20 @@
     if (msg.type === "INCOMING_STATE") {
       state.incomingActive = Boolean(msg.active)
       applyMeetAudioMuting()
+      return
+    }
+    // One click to go back to a normal meeting: every capture and every stream
+    // stops, and the real microphone is handed back to Meet.
+    if (msg.type === "STOP_ALL") {
+      stopStream("outgoing")
+      stopStream("incoming")
+      if (state.live.outgoing) stopLive("outgoing", false)
+      if (state.live.incoming) stopLive("incoming", false)
+      if (state.recorders.outgoing) stopRecording("outgoing")
+      if (state.recorders.incoming) stopRecording("incoming")
+      state.incomingActive = false
+      applyMeetAudioMuting()
+      startPassthrough()
       return
     }
     if (!isDirection(msg.direction)) return

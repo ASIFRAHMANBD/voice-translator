@@ -6,6 +6,9 @@
 
   const SOURCE = "meet-ai"
   const MAX_ENTRIES = 30
+  // The board keeps more lines than the small log, so the host can scroll back
+  // through a long meeting.
+  const MAX_BOARD_LINES = 200
   const MAX_CONTEXT_TURNS = 6
   const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition
   // realtime = OpenAI live interpreter: translates while you speak (hands-free only).
@@ -131,6 +134,11 @@
     micReady: false,
     micMuted: false,
     collapsed: false,
+    // The big transcript board, opened from the header.
+    boardOpen: false,
+    // Who is talking on the client side right now, and what they are called.
+    participants: [],
+    activeSpeakers: [],
     speakBangla: true,
     voiceRate: DEFAULT_VOICE_RATE,
     voice: DEFAULT_VOICE,
@@ -291,11 +299,36 @@
     })
     collapseBtn.addEventListener("click", handleCollapseToggle)
 
+    // One click to go back to a normal meeting: stops everything and hands the
+    // microphone back to Meet.
+    const stopAllBtn = el("button", {
+      type: "button",
+      className: "mai-stop-all",
+      "aria-keyshortcuts": "Alt+S",
+      title: "Stop everything and go back to normal mode",
+      text: "Stop",
+    })
+    stopAllBtn.addEventListener("click", handleStopAll)
+
+    // The board is a large, readable transcript panel, for when the voice output
+    // is missing and the text has to carry the meeting.
+    const boardBtn = el("button", {
+      type: "button",
+      className: "mai-icon-btn",
+      "aria-pressed": "false",
+      "aria-label": "Open the transcript board",
+      title: "Transcript board",
+      text: "▤",
+    })
+    boardBtn.addEventListener("click", handleBoardToggle)
+
     const header = el("div", { className: "mai-header" }, [
       el("span", { className: "mai-grip", "aria-hidden": "true", text: "⋮⋮" }),
       title,
       langLabel,
       langSelect,
+      boardBtn,
+      stopAllBtn,
       collapseBtn,
     ])
 
@@ -337,6 +370,7 @@
     const summary = buildSummary()
     const settings = buildSettings()
     const voicePicker = buildVoicePicker()
+    const board = buildBoard()
 
     const body = el("div", { id: "mai-body", className: "mai-body" }, [
       mic,
@@ -355,6 +389,7 @@
     const panel = el("section", { id: "meet-ai-hud", "aria-labelledby": "mai-title", "data-collapsed": "false" }, [
       header,
       body,
+      board.root,
     ])
 
     Object.assign(ui, {
@@ -364,10 +399,113 @@
       modeHint: modeSwitch.hint,
       buttons: { outgoing: speak, incoming: listen },
       conversation,
+      board: board.root,
+      boardBody: board.body,
+      boardEmpty: board.empty,
+      boardBtn,
+      stopAllBtn,
     })
 
     enableDragging(panel, header)
     document.body.append(panel)
+  }
+
+  // The board: a large, readable transcript of the whole meeting. It is what
+  // the host reads when the voice output is missing, so it shows who said what,
+  // in big text, and it can be scrolled back through.
+  const buildBoard = () => {
+    const empty = el("p", {
+      className: "mai-board-empty",
+      text: "Nothing on the board yet. Start the conversation and the lines appear here.",
+    })
+    const body = el("div", { className: "mai-board-body", role: "log", "aria-label": "Meeting transcript" }, [empty])
+
+    const closeBtn = el("button", {
+      type: "button",
+      className: "mai-icon-btn",
+      "aria-label": "Close the transcript board",
+      title: "Close",
+      text: "✕",
+    })
+    closeBtn.addEventListener("click", handleBoardToggle)
+
+    const copyBtn = el("button", { type: "button", className: "mai-board-btn", text: "Copy" })
+    copyBtn.addEventListener("click", handleBoardCopy)
+
+    const summaryBtn = el("button", { type: "button", className: "mai-board-btn", text: "Summary" })
+    summaryBtn.addEventListener("click", handleSummarize)
+
+    const root = el("section", { className: "mai-board", "aria-label": "Transcript board", hidden: true }, [
+      el("div", { className: "mai-board-header" }, [
+        el("h2", { className: "mai-board-title", text: "Meeting board" }),
+        el("div", { className: "mai-board-actions" }, [copyBtn, summaryBtn, closeBtn]),
+      ]),
+      body,
+    ])
+
+    return { root, body, empty }
+  }
+
+  // The board keeps its own copy of the lines, so it can be read at a glance
+  // while the small log keeps the full detail.
+  const boardLines = []
+
+  const boardWho = (direction, speakerName) => {
+    if (direction === "outgoing") return "You"
+    return speakerName || "Client"
+  }
+
+  // Who is the client speaking right now? The loudest detected speaker wins, so
+  // a single name is enough when only one person talks.
+  const currentSpeakerName = () => {
+    const speaker = state.activeSpeakers[0]
+    if (speaker?.name) return speaker.name
+    return ""
+  }
+
+  // The name to show on a line: the caption's own speaker when Meet gave one,
+  // otherwise whoever is talking right now.
+  const resolveSpeakerName = (direction, speakerName) => {
+    if (direction === "outgoing") return ""
+    const name = speakerName || currentSpeakerName()
+    return name || ""
+  }
+
+  const renderBoardLine = (direction, speakerName, source, translation) => {
+    if (!ui.boardBody) return
+    if (ui.boardEmpty.isConnected) ui.boardEmpty.remove()
+    const who = boardWho(direction, speakerName)
+    const line = el("article", { className: `mai-board-line mai-board-line-${direction}` }, [
+      el("p", { className: "mai-board-who", text: who }),
+      source ? el("p", { className: "mai-board-source", text: source }) : null,
+      translation ? el("p", { className: "mai-board-text", text: translation }) : null,
+    ])
+    ui.boardBody.append(line)
+    while (ui.boardBody.children.length > MAX_BOARD_LINES) ui.boardBody.firstElementChild.remove()
+    ui.boardBody.scrollTop = ui.boardBody.scrollHeight
+  }
+
+  const handleBoardToggle = () => {
+    state.boardOpen = !state.boardOpen
+    ui.board.hidden = !state.boardOpen
+    ui.boardBtn.setAttribute("aria-pressed", String(state.boardOpen))
+    if (state.boardOpen) ui.boardBody.scrollTop = ui.boardBody.scrollHeight
+  }
+
+  const handleBoardCopy = async () => {
+    const text = boardLines
+      .map((line) => `${line.who}: ${line.translation || line.source}`)
+      .join("\n")
+    if (!text) {
+      setStatus("The board is empty.", "warning")
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(text)
+      setStatus("Board copied to the clipboard.", "success")
+    } catch {
+      setStatus("Couldn't copy the board. Select the text and copy it.", "warning")
+    }
   }
 
   // Starts/stops both directions together: your Bangla out, the client's words in.
@@ -690,11 +828,17 @@
     const targetLang = isOutgoing ? data.target_lang || state.targetLang : "bn"
     const sourceLabel = LANG_LABELS[sourceLang] || (sourceLang ? sourceLang.toUpperCase() : "Auto")
     const targetLabel = LANG_LABELS[targetLang] || targetLang.toUpperCase()
-    const who = isOutgoing ? "You" : data.speaker_name ? `Client (${data.speaker_name})` : "Client"
+    const speakerName = resolveSpeakerName(direction, data.speaker_name)
+    // The speaker's name leads the line, so several people talking at once stay
+    // easy to tell apart.
+    const who = isOutgoing ? "You" : speakerName || "Client"
 
     const children = [
       el("p", { className: "mai-entry-meta", text: `${who} · ${sourceLabel} → ${targetLabel}` }),
     ]
+    if (!isOutgoing && speakerName) {
+      children.push(el("p", { className: "mai-entry-speaker", text: `${speakerName} said:` }))
+    }
     if (data.transcript) children.push(el("p", { className: "mai-entry-source", lang: sourceLang || undefined, text: data.transcript }))
     if (data.understood && data.understood !== data.transcript) {
       children.push(
@@ -725,6 +869,13 @@
 
     const entry = el("article", { className: `mai-entry mai-entry-${direction}` }, children)
     appendToLog(entry)
+
+    const boardSource = data.understood || data.transcript || ""
+    const boardTranslation = data.unclear ? "" : data.translated_text || ""
+    if (boardSource || boardTranslation) {
+      boardLines.push({ who, source: boardSource, translation: boardTranslation })
+      renderBoardLine(direction, speakerName, boardSource, boardTranslation)
+    }
   }
 
   const isLogPinnedToBottom = () => ui.log.scrollHeight - ui.log.scrollTop - ui.log.clientHeight < 24
@@ -775,7 +926,7 @@
   const recordHistory = (direction, data, clip) => {
     state.history.push({
       speaker: direction === "outgoing" ? "host" : "client",
-      name: clip.speakerName || "",
+      name: clip.speakerName || (direction === "outgoing" ? "" : currentSpeakerName()),
       text: (data.understood || data.transcript || "").trim(),
       translation: (data.translated_text || "").trim(),
     })
@@ -922,7 +1073,8 @@
   // A line that could not be translated stays visible with its original text and a Retry
   // button, instead of silently disappearing.
   const addFailedEntry = (clip, error) => {
-    const who = clip.direction === "outgoing" ? "You" : clip.speakerName ? `Client (${clip.speakerName})` : "Client"
+    const speakerName = resolveSpeakerName(clip.direction, clip.speakerName)
+    const who = clip.direction === "outgoing" ? "You" : speakerName || "Client"
     const retryBtn = el("button", { type: "button", className: "mai-btn mai-btn-secondary mai-entry-retry", text: "Retry" })
     const article = el("article", { className: `mai-entry mai-entry-${clip.direction} mai-entry-failed` }, [
       el("p", { className: "mai-entry-meta", text: `${who} · not translated` }),
@@ -977,7 +1129,8 @@
 
   const renderInterim = (text, direction = "outgoing", speakerName = "") => {
     const { line, label, text: textNode } = ui.interim[direction]
-    label.textContent = direction === "outgoing" ? "You" : speakerName ? `Client (${speakerName})` : "Client"
+    const name = resolveSpeakerName(direction, speakerName)
+    label.textContent = direction === "outgoing" ? "You" : name || "Client"
     textNode.textContent = text
     line.hidden = !text
   }
@@ -1219,14 +1372,17 @@
         else if (message.state === "connected") setStatus("Client listener reconnected.", "success")
         break
       case "interim":
-        renderInterim(message.text || "", "incoming")
+        renderInterim(message.text || "", "incoming", currentSpeakerName())
         setSpeaking("incoming", Boolean(message.text))
         break
       case "segment":
         renderInterim("", "incoming")
         setSpeaking("incoming", false)
         if (message.text) {
-          enqueueLiveClip(buildTextClip(message.text, "incoming", "", message.lang || ""))
+          // The name of whoever is talking right now, so the line can say who
+          // said it even when several people talk at once.
+          const speakerName = currentSpeakerName()
+          enqueueLiveClip(buildTextClip(message.text, "incoming", speakerName, message.lang || ""))
         }
         break
       case "error": {
@@ -1467,6 +1623,10 @@
     if (!translated) entry.translation.textContent = "(no translation)"
     rememberTurn("outgoing", transcript)
     if (transcript || translated) recordHistory("outgoing", { transcript, translated_text: translated }, {})
+    if (transcript || translated) {
+      boardLines.push({ who: "You", source: transcript, translation: translated })
+      renderBoardLine("outgoing", "", transcript, translated)
+    }
   }
 
   // Deltas are append-only pieces of text (no spaces need to be added between them).
@@ -1710,7 +1870,22 @@
     ui.summaryFeedback.textContent = ""
     ui.summaryResult.hidden = false
     ui.summaryText.focus()
+    renderBoardSummary(state.summary.text)
     setStatus("Summary ready.", "success")
+  }
+
+  // The summary is shown on the board too, so it can be read at a glance while
+  // the meeting is still going on.
+  const renderBoardSummary = (text) => {
+    if (!ui.boardBody) return
+    if (ui.boardEmpty.isConnected) ui.boardEmpty.remove()
+    ui.boardBody.append(
+      el("article", { className: "mai-board-line mai-board-line-summary" }, [
+        el("p", { className: "mai-board-who", text: "Summary" }),
+        el("p", { className: "mai-board-text mai-board-summary", text }),
+      ])
+    )
+    ui.boardBody.scrollTop = ui.boardBody.scrollHeight
   }
 
   const handleSummaryCopy = async () => {
@@ -1787,6 +1962,80 @@
       return
     }
     postToInject("START_REC", { direction, mode: state.mode, silenceMs: state.silenceMs })
+  }
+
+  // One click to go back to a normal meeting. Everything stops: both live
+  // interpreters, the caption watcher, the browser speech recognition and the
+  // recording. The page then hands the real microphone back to Meet.
+  const handleStopAll = () => {
+    const wasBusy = anyActive() || Boolean(state.realtime || state.clientLive || state.speech || state.captions)
+
+    if (state.realtime) {
+      state.realtime.stopping = true
+      postToInject("STOP_STREAM", { direction: "outgoing" })
+      clearTimeout(state.realtime.stopTimer)
+      clearTimeout(state.realtime.closeTimer)
+      clearTimeout(state.realtime.reconnectTimer)
+      finalizeLiveEntry(state.realtime)
+      try {
+        state.realtime.port?.disconnect()
+      } catch {
+        // Already gone.
+      }
+      state.realtime = null
+    }
+
+    if (state.clientLive) {
+      state.clientLive.stopping = true
+      state.clientLive.finished = true
+      postToInject("STOP_STREAM", { direction: "incoming" })
+      clearTimeout(state.clientLive.stopTimer)
+      clearTimeout(state.clientLive.closeTimer)
+      clearTimeout(state.clientLive.reconnectTimer)
+      try {
+        state.clientLive.port?.disconnect()
+      } catch {
+        // Already gone.
+      }
+      state.clientLive = null
+    }
+
+    if (state.captions) {
+      clearTimeout(state.captions.missingTimer)
+      try {
+        state.captions.watcher?.stop()
+      } catch {
+        // Already stopped.
+      }
+      state.captions = null
+    }
+
+    if (state.speech) {
+      state.speech.stopping = true
+      state.speech.fatal = true
+      try {
+        state.speech.recognition?.abort()
+      } catch {
+        // Already stopped.
+      }
+      state.speech = null
+    }
+
+    postToInject("STOP_ALL")
+    renderInterim("", "outgoing")
+    renderInterim("", "incoming")
+    DIRECTIONS.forEach((direction) => {
+      state.directions[direction].status = "idle"
+      state.directions[direction].pending = 0
+      state.directions[direction].speaking = false
+    })
+    renderAll()
+    setStatus(
+      wasBusy
+        ? "Stopped. You're back to a normal meeting. The board keeps the transcript."
+        : "Nothing was running. You're back to a normal meeting.",
+      "success"
+    )
   }
 
   // Both on: stop both. Otherwise start whichever direction isn't running yet.
@@ -1912,6 +2161,12 @@
 
   const handleShortcut = (event) => {
     if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) return
+    if (event.code === "KeyS") {
+      event.preventDefault()
+      event.stopPropagation()
+      handleStopAll()
+      return
+    }
     if (event.code === "KeyC") {
       if (state.mode !== "vad") return
       event.preventDefault()
@@ -1988,6 +2243,17 @@
       state.micReady = Boolean(msg.ready)
       state.micMuted = Boolean(msg.muted)
       renderMic()
+      return
+    }
+
+    // The people in the meeting, so the text can say who is talking.
+    if (msg.type === "PARTICIPANTS" && Array.isArray(msg.participants)) {
+      state.participants = msg.participants
+      return
+    }
+
+    if (msg.type === "SPEAKERS" && Array.isArray(msg.speakers)) {
+      state.activeSpeakers = msg.speakers
       return
     }
 

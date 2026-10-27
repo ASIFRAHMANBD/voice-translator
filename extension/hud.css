@@ -375,6 +375,165 @@
 #meet-ai-hud .mai-status[data-tone="warning"] { color: var(--mai-warning); }
 #meet-ai-hud .mai-status[data-tone="error"] { color: var(--mai-danger); }
 
+/* Stop-all --------------------------------------------------------------- */
+#meet-ai-hud .mai-stop-all {
+  min-height: 28px;
+  padding: 0 var(--mai-space-3);
+  border: 1px solid var(--mai-danger);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--mai-danger);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--mai-duration) ease, color var(--mai-duration) ease;
+}
+
+#meet-ai-hud .mai-stop-all:hover {
+  background: var(--mai-danger);
+  color: #202124;
+}
+
+#meet-ai-hud .mai-stop-all:focus-visible {
+  outline: 2px solid var(--mai-focus);
+  outline-offset: 2px;
+}
+
+/* Transcript board -------------------------------------------------------- */
+/* A big, high-contrast view of the whole meeting, for when the voice output is
+   missing and the text has to carry the conversation. */
+#meet-ai-hud .mai-board {
+  position: fixed;
+  inset: 3vh 3vw;
+  z-index: 2147483001;
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-3);
+  padding: var(--mai-space-4);
+  box-sizing: border-box;
+  background: var(--mai-surface);
+  color: var(--mai-text);
+  border: 1px solid var(--mai-border);
+  border-radius: var(--mai-radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  font: 400 20px/1.5 "Google Sans", Roboto, "Noto Sans Bengali", "Noto Sans JP", system-ui, sans-serif;
+}
+
+#meet-ai-hud .mai-board[hidden] {
+  display: none !important;
+}
+
+#meet-ai-hud .mai-board-header {
+  display: flex;
+  align-items: center;
+  gap: var(--mai-space-3);
+  flex: 0 0 auto;
+}
+
+#meet-ai-hud .mai-board-title {
+  flex: 1;
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+#meet-ai-hud .mai-board-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--mai-space-2);
+}
+
+#meet-ai-hud .mai-board-btn {
+  min-height: 34px;
+  padding: 0 var(--mai-space-3);
+  border: 1px solid #5f6368;
+  border-radius: var(--mai-radius-md);
+  background: var(--mai-surface-raised);
+  color: var(--mai-text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+#meet-ai-hud .mai-board-btn:hover {
+  filter: brightness(1.12);
+}
+
+#meet-ai-hud .mai-board-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--mai-space-3);
+  background: var(--mai-surface-raised);
+  border-radius: var(--mai-radius-md);
+  overscroll-behavior: contain;
+}
+
+#meet-ai-hud .mai-board-empty {
+  margin: 0;
+  color: var(--mai-text-muted);
+  font-size: 16px;
+}
+
+#meet-ai-hud .mai-board-line {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mai-space-1);
+  padding: var(--mai-space-2) 0 var(--mai-space-3);
+  border-bottom: 1px solid var(--mai-border);
+}
+
+#meet-ai-hud .mai-board-line:last-child {
+  border-bottom: 0;
+}
+
+#meet-ai-hud .mai-board-who {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--mai-accent);
+}
+
+#meet-ai-hud .mai-board-line-outgoing .mai-board-who {
+  color: var(--mai-success);
+}
+
+#meet-ai-hud .mai-board-line-summary {
+  background: rgba(138, 180, 248, 0.08);
+  border-radius: var(--mai-radius-md);
+  padding: var(--mai-space-3);
+}
+
+#meet-ai-hud .mai-board-summary {
+  font-size: 17px;
+  white-space: pre-wrap;
+}
+
+#meet-ai-hud .mai-board-source {
+  margin: 0;
+  font-size: 15px;
+  color: var(--mai-text-muted);
+}
+
+#meet-ai-hud .mai-board-text {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Speaker name on a log line ---------------------------------------------- */
+#meet-ai-hud .mai-entry-speaker {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mai-accent);
+}
+
 /* Log --------------------------------------------------------------------- */
 #meet-ai-hud .mai-log {
   display: flex;

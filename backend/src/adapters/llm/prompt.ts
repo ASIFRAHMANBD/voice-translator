@@ -34,7 +34,13 @@ export const buildMessages = ({ direction, text, sourceLang, targetLang, context
   // Hosts speak everyday Bangla; colloquial verb forms mean the same as the standard ones.
   const sourceRule =
     sourceLang === "bn"
-      ? "The host speaks everyday spoken Bangla: colloquial forms such as আসতেছি, করতেছি, যাইতেছি, করসি mean the same as আসছি, করছি, যাচ্ছি, করেছি."
+      ? [
+          "The host speaks everyday spoken Bangla: colloquial forms such as আসতেছি, করতেছি, যাইতেছি, করসি mean the same as আসছি, করছি, যাচ্ছি, করেছি.",
+          // The speech recogniser sometimes writes Bangla in Devanagari (Hindi) script.
+          // Say so, or the words get read as Hindi and the meaning is lost.
+          "The Bangla may arrive in Devanagari (Hindi) script because the recogniser mixed up the script. Read those words as the Bangla they sound like, and always write Bangla in Bengali script.",
+          "When the Bangla arrives in Devanagari, write the \"understood\" line in correct Bengali script with standard spelling (আমি, সন্ধ্যার মধ্যে, পাঠিয়ে দেব), because that line is shown to the host.",
+        ].join(" ")
       : ""
 
   const system = [

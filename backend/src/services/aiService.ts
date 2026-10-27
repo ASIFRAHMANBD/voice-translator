@@ -3,7 +3,7 @@ import { createSttAdapter } from "../adapters/stt/index.js"
 import { createLlmAdapter } from "../adapters/llm/index.js"
 import { createTtsAdapter } from "../adapters/tts/index.js"
 import { buildDemoResponse } from "../demo/demoResponse.js"
-import { guessLangFromText, normalizeLang } from "../lib/lang.js"
+import { guessLangFromText, isDevanagari, normalizeLang } from "../lib/lang.js"
 import { splitForSpeech } from "../lib/sentences.js"
 import type {
   LlmAdapter,
@@ -61,7 +61,10 @@ export const processVoice = async (request: ProcessVoiceRequest): Promise<Proces
       ? [{ text: input.text, lang: isOutgoing ? BANGLA : (input.lang || "") }, 0]
       : await timed(() =>
           adapters.stt.transcribe(input.audio, input.mime, {
-            lang: isOutgoing ? BANGLA : undefined,
+            // The language is not forced on the recogniser: some providers
+            // return nothing at all when the hint does not match the audio.
+            // The script of the result says more about the language anyway.
+            lang: undefined,
             prompt: buildSttPrompt(request),
           })
         )
@@ -126,8 +129,14 @@ export const processVoice = async (request: ProcessVoiceRequest): Promise<Proces
   const ttsMs = shouldSpeak ? Math.round(performance.now() - ttsStart) : 0
   const analysis = translation.unclear ? "" : await analysisPromise
 
+  // A recogniser that mixes up the script writes Bangla in Devanagari. The
+  // interpreter's "understood" line is the same words in clean Bengali, so it
+  // is shown instead of the garbled original.
+  const transcriptInWrongScript = isOutgoing && isDevanagari(transcript)
+  const shownTranscript = transcriptInWrongScript && translation.understood ? translation.understood : transcript
+
   return {
-    transcript,
+    transcript: shownTranscript,
     detected_lang: detectedLang,
     translated_text: translation.translated_text,
     understood: translation.understood,

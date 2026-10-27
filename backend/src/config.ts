@@ -86,6 +86,14 @@ export const config = {
     apiKey: readString("DEEPGRAM_API_KEY"),
     model: readString("DEEPGRAM_MODEL", "nova-3"),
   },
+  // DeepInfra speaks the OpenAI API, so it serves both the LLM (chat
+  // completions) and speech-to-text (audio transcriptions).
+  deepinfra: {
+    apiKey: readString("DEEPINFRA_API_KEY"),
+    baseUrl: readString("DEEPINFRA_BASE_URL", "https://api.deepinfra.com/v1/openai"),
+    llmModel: readString("DEEPINFRA_LLM_MODEL", "google/gemma-4-31B-it"),
+    sttModel: readString("DEEPINFRA_STT_MODEL", "openai/whisper-large-v3"),
+  },
   gemini: {
     apiKey: readString("GEMINI_API_KEY"),
     model: readString("GEMINI_MODEL", "gemini-2.5-flash"),

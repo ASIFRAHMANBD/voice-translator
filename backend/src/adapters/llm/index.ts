@@ -1,12 +1,14 @@
 import type { AppConfig } from "../../config.js"
 import type { LlmAdapter } from "../../types.js"
 import { createGeminiLlm } from "./gemini.js"
+import { createDeepInfraLlm } from "./deepinfra.js"
 import { createOpenAiLlm } from "./openai.js"
 import { createOpenAiCompatibleLlm } from "./openaiCompatible.js"
 
 const factories: Record<string, (config: AppConfig) => LlmAdapter> = {
   openai: createOpenAiLlm,
   gemini: createGeminiLlm,
+  deepinfra: createDeepInfraLlm,
   "openai-compatible": createOpenAiCompatibleLlm,
   vllm: createOpenAiCompatibleLlm,
   custom: createOpenAiCompatibleLlm,

@@ -1,6 +1,7 @@
 import { requireValue, type AppConfig } from "../../config.js"
 import type { SttAdapter } from "../../types.js"
 import { createCustomHttpStt } from "./customHttp.js"
+import { createDeepInfraStt } from "./deepinfra.js"
 import { createDeepgramStt } from "./deepgram.js"
 import { createGroqStt } from "./groqWhisper.js"
 import { createOpenAiCompatibleStt } from "./openaiWhisper.js"
@@ -15,6 +16,7 @@ const factories: Record<string, (config: AppConfig) => SttAdapter> = {
     }),
   groq: createGroqStt,
   deepgram: createDeepgramStt,
+  deepinfra: createDeepInfraStt,
   custom: createCustomHttpStt,
 }
 

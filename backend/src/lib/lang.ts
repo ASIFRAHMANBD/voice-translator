@@ -21,6 +21,10 @@ export const normalizeLang = (raw: string | undefined | null): string => {
 
 export const languageName = (code: string): string => LANGUAGE_NAMES[code] || code || "the detected language"
 
+// Some recognisers write Bangla in Devanagari (Hindi) script. The words are
+// right, only the letters are from the wrong script.
+export const isDevanagari = (text: string): boolean => /\p{Script=Devanagari}/u.test(text)
+
 // Text from captions or live transcription carries no language tag. The client
 // speaks Japanese or English, which differ by script; Bangla has its own script too.
 export const guessLangFromText = (text: string): string => {

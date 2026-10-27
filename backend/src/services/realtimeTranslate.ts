@@ -1,5 +1,6 @@
 import WebSocket, { type RawData } from "ws"
 import { config } from "../config.js"
+import { isFatalUpstreamError } from "../lib/upstreamErrors.js"
 import { createTtsAdapter } from "../adapters/tts/index.js"
 import type { Voice } from "../types.js"
 
@@ -276,7 +277,9 @@ export const handleTranslateClient = (client: WebSocket, targetLang: string, ini
         const message = event.error?.message || "Live interpreter error"
         console.warn(`[live ${targetLang}] service error: ${message}`)
         // Before the session is configured, an error means our settings were rejected.
-        if (!ready) fail(message)
+        // A quota or credential problem will not fix itself on a retry either, so
+        // it must end the session instead of reconnecting in a loop.
+        if (!ready || isFatalUpstreamError(message)) fail(message)
         else send({ type: "error", message, fatal: false })
         return
       }

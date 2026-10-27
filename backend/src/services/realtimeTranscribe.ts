@@ -1,6 +1,7 @@
 import WebSocket, { type RawData } from "ws"
 import { config } from "../config.js"
 import { guessLangFromText } from "../lib/lang.js"
+import { isFatalUpstreamError } from "../lib/upstreamErrors.js"
 
 // Live transcription of the client's speech (meeting audio). The client may switch
 // between Japanese and English at any time, so no language is fixed: the model
@@ -268,7 +269,9 @@ export const handleTranscribeClient = (client: WebSocket): void => {
       case "error": {
         const message = event.error?.message || "Client transcription error"
         console.warn(`[client transcription] service error: ${message}`)
-        if (!ready) fail(message)
+        // A quota or credential problem will not fix itself on a retry, so it
+        // must end the session instead of reconnecting in a loop.
+        if (!ready || isFatalUpstreamError(message)) fail(message)
         else send({ type: "error", message, fatal: false })
         return
       }

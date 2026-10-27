@@ -35,6 +35,10 @@
     "language-not-supported": "Chrome can't recognize Bangla here. Choose Whisper in Settings.",
   }
   const DEFAULT_BACKEND_URL = "http://localhost:3000"
+  // Errors that will never succeed on a retry: no credit, no quota, a bad key.
+  // Reconnecting in a loop only hides the reason, so these end the session.
+  const UNRECOVERABLE_ERROR = /no credits remaining|insufficient[_ ]quota|credit_balance_exhausted|billing|invalid[_ ]api[_ ]key|incorrect api key|no api key|model[_ ]not[_ ]found|does not have access to/i
+  const isUnrecoverableError = (message) => UNRECOVERABLE_ERROR.test(message || "")
   // Cutting a sentence at very short pauses split words in half and lost them;
   // 0.6 s keeps whole phrases together.
   const DEFAULT_SILENCE_MS = 600
@@ -954,7 +958,7 @@
     if (!isLive) setDirectionStatus(direction, "idle")
     const data = response.data || {}
     if (data.unclear) {
-      addEntry(direction, { ...data, target_lang: clip.targetLang })
+      addEntry(direction, { ...data, target_lang: clip.targetLang, speaker_name: clip.speakerName })
       setStatus(
         direction === "outgoing" ? "Didn't catch that. Nothing was sent; please repeat." : "Couldn't understand the client.",
         "warning"
@@ -1386,10 +1390,16 @@
         }
         break
       case "error": {
-        const fatal = message.fatal && !message.retryable
+        // A quota or key problem cannot be fixed by reconnecting, so it ends
+        // the session even when the backend called it retryable.
+        const unrecoverable = isUnrecoverableError(message.message)
+        const fatal = (message.fatal && !message.retryable) || unrecoverable
         if (fatal) {
           session.fatal = true
           session.errorShown = true
+          // Keep the reason, so the message that replaces this one still shows
+          // what actually went wrong.
+          session.fatalMessage = message.message || "unknown error"
         }
         setStatus(`Client listener: ${message.message || "unknown error"}`, fatal ? "error" : "warning")
         break
@@ -1506,7 +1516,15 @@
       return
     }
     if (session.fatal) {
-      finishClientLive(session, "Client listener disconnected. Press start to reconnect.")
+      // Show why it stopped, not a generic "press start" hint.
+      const reason = session.fatalMessage || "the client listener stopped"
+      finishClientLive(session, `Client listener stopped: ${reason}`)
+      return
+    }
+    // The worker drops the port right after reporting a fatal error, so the
+    // reconnect must not start over the message that explains the failure.
+    if (session.errorShown) {
+      finishClientLive(session, `Client listener stopped: ${session.fatalMessage || "the backend closed the connection"}`)
       return
     }
     scheduleLiveReconnect(session, {
@@ -1525,6 +1543,8 @@
       stopSent: false,
       finished: false,
       errorShown: false,
+      // Why the session failed, so the message stays useful after the socket closes.
+      fatalMessage: "",
       stopTimer: null,
       closeTimer: null,
     }
@@ -1577,7 +1597,9 @@
     state.clientLive = null
     if (!session.stopping) postToInject("STOP_STREAM", { direction: "incoming" })
     setDirectionStatus("incoming", "idle")
-    if (errorMessage && !session.errorShown) setStatus(errorMessage, "error")
+    // The reason is shown even when the error was already reported, so the
+    // final message keeps the actual cause.
+    if (errorMessage) setStatus(errorMessage, "error")
     else if (!session.errorShown) refreshLiveStatus()
   }
 
@@ -1689,10 +1711,16 @@
         }
         break
       case "error": {
-        const fatal = message.fatal && !message.retryable
+        // A quota or key problem cannot be fixed by reconnecting, so it ends
+        // the session even when the backend called it retryable.
+        const unrecoverable = isUnrecoverableError(message.message)
+        const fatal = (message.fatal && !message.retryable) || unrecoverable
         if (fatal) {
           session.fatal = true
           session.errorShown = true
+          // Keep the reason, so the message that replaces this one still shows
+          // what actually went wrong.
+          session.fatalMessage = message.message || "unknown error"
         }
         setStatus(`Live interpreter: ${message.message || "unknown error"}`, fatal ? "error" : "warning")
         break
@@ -1739,7 +1767,15 @@
       return
     }
     if (session.fatal) {
-      finishRealtime(session, "Live interpreter disconnected. Press start to reconnect.")
+      // Show why it stopped, not a generic "press start" hint.
+      const reason = session.fatalMessage || "the live interpreter stopped"
+      finishRealtime(session, `Live interpreter stopped: ${reason}`)
+      return
+    }
+    // The worker drops the port right after reporting a fatal error, so the
+    // reconnect must not start over the message that explains the failure.
+    if (session.errorShown) {
+      finishRealtime(session, `Live interpreter stopped: ${session.fatalMessage || "the backend closed the connection"}`)
       return
     }
     scheduleLiveReconnect(session, {
@@ -1763,6 +1799,8 @@
       stopSent: false,
       finished: false,
       errorShown: false,
+      // Why the session failed, so the message stays useful after the socket closes.
+      fatalMessage: "",
       stopTimer: null,
       closeTimer: null,
       entry: null,

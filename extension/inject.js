@@ -274,9 +274,17 @@
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 512
       source.connect(analyser)
+
+      // Connect to destination via zero-gain sink to activate Chrome's pull-based WebAudio thread
+      const sink = ctx.createGain()
+      sink.gain.value = 0
+      analyser.connect(sink)
+      sink.connect(ctx.destination)
+
       const monitor = {
         source,
         analyser,
+        sink,
         samples: new Float32Array(analyser.fftSize),
         lastVoiceAt: 0,
       }
@@ -320,6 +328,8 @@
   const HOST_RMS_THRESHOLD = 0.012
   const HOST_OVERRIDE_RMS = 0.035
 
+  const isHostSpeaking = () => (performance.now() - hostLastSpokeAt) < HOST_SPEECH_HANGOVER_MS
+
   const updateGainManager = () => {
     if (!state.audioCtx || !state.rawMicGain || !state.hostAnalyser) return
 
@@ -348,25 +358,28 @@
     if (state.meetMuted) {
       targetGain = MIX.silent
     } else if (state.interpreting) {
-      if (remoteActive && !hostSpeaking) {
-        targetGain = MIX.silent
-      } else if (hostSpeaking) {
-        targetGain = MIX.dimmed
-      } else {
-        targetGain = MIX.silent
-      }
+      // Single-voice translation mode:
+      // Client must hear ONLY the translated AI voice (e.g. Japanese or English).
+      // Host raw Bangla voice is strictly silenced to Google Meet.
+      targetGain = MIX.silent
     } else {
       // Normal meeting mode (Stop clicked or initial)
       if (remoteActive && !hostSpeaking) {
-        targetGain = MIX.silent // Prevent client voice from echoing back via laptop mic!
-      } else if (hostSpeaking) {
-        targetGain = MIX.normal // Full normal host voice
+        targetGain = MIX.silent // Duck mic while client speaks through laptop speakers to prevent acoustic echo
       } else {
-        targetGain = MIX.silent
+        targetGain = MIX.normal // Full normal host voice with zero gating when remote is silent
       }
     }
 
     state.rawMicGain.gain.setTargetAtTime(targetGain, state.audioCtx.currentTime, 0.03)
+
+    const rawPct = Math.round(targetGain * 100)
+    const translatorPct = state.interpreting ? 100 : 0
+    if (state.lastReportedRawPct !== rawPct || state.lastReportedInterpreting !== state.interpreting) {
+      state.lastReportedRawPct = rawPct
+      state.lastReportedInterpreting = state.interpreting
+      post("MIX", { raw: rawPct, translator: translatorPct, interpreting: state.interpreting })
+    }
   }
 
   window.setInterval(updateGainManager, 35)
@@ -461,7 +474,6 @@
           if (el.volume !== 0) {
             try {
               el.volume = 0
-              el.muted = true
             } catch {
               // Non-fatal
             }
@@ -472,15 +484,9 @@
             state.duckedVolumes.delete(el)
             try {
               el.volume = typeof original === "number" && !isNaN(original) && original > 0 ? original : 1
-              el.muted = false
             } catch {
               // Non-fatal
             }
-          } else if (el.muted) {
-            try {
-              el.muted = false
-              el.volume = 1
-            } catch { }
           }
         }
       })
@@ -626,7 +632,8 @@
         return
       }
       try {
-        const node = audioCtx.createMediaStreamSource(stream)
+        const monitor = state.remoteMonitors.get(stream)
+        const node = monitor ? monitor.source : audioCtx.createMediaStreamSource(stream)
         node.connect(incoming.bus)
         incoming.sources.set(stream, node)
         attachSpeakerDetector(stream, node)
@@ -663,7 +670,11 @@
     if (incoming.users > 0 || !incoming.bus) return
     incoming.observer?.disconnect()
     window.clearInterval(incoming.rescanTimer)
-    incoming.sources.forEach((node) => node.disconnect())
+    incoming.sources.forEach((node) => {
+      try {
+        if (incoming.bus) node.disconnect(incoming.bus)
+      } catch {}
+    })
     incoming.sources.clear()
     state.speakerDetectors.forEach((detector) => {
       window.clearInterval(detector.timer)
@@ -815,7 +826,12 @@
     return Math.sqrt(sum / session.samples.length)
   }
 
-  const isOutgoingGated = () => state.meetMuted || (state.gateOnPlayback && state.duckCount > 0)
+  const isOutgoingGated = () =>
+    state.meetMuted ||
+    state.duckCount > 0 ||
+    state.clipsPlaying > 0 ||
+    Boolean(state.pcmPlayers.incoming?.active) ||
+    (isRemoteSpeaking() && !isHostSpeaking())
 
   const tickLive = (session) => {
     const segment = session.segment

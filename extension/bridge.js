@@ -34,19 +34,21 @@
     "audio-capture": "No microphone found for speech recognition.",
     "language-not-supported": "Chrome can't recognize Bangla here. Choose Whisper in Settings.",
   }
-  const DEFAULT_BACKEND_URL = "http://localhost:3000"
+  const DEFAULT_BACKEND_URL = "https://translate.cloudproductionltd.com"
   // Errors that will never succeed on a retry: no credit, no quota, a bad key.
   // Reconnecting in a loop only hides the reason, so these end the session.
   const UNRECOVERABLE_ERROR = /no credits remaining|insufficient[_ ]quota|credit_balance_exhausted|billing|invalid[_ ]api[_ ]key|incorrect api key|no api key|model[_ ]not[_ ]found|does not have access to/i
   const isUnrecoverableError = (message) => UNRECOVERABLE_ERROR.test(message || "")
   // Cutting a sentence at very short pauses split words in half and lost them;
   // 0.6 s keeps whole phrases together.
-  const DEFAULT_SILENCE_MS = 600
+  const DEFAULT_SILENCE_MS = 400
   const DIRECTIONS = ["outgoing", "incoming"]
   const MODES = ["vad", "ptt"]
   const PAUSE_OPTIONS = [
+    { value: 350, label: "0.35 s (simultaneous)" },
+    { value: 400, label: "0.4 s (recommended)" },
     { value: 450, label: "0.45 s (fast talkers)" },
-    { value: 600, label: "0.6 s (recommended)" },
+    { value: 600, label: "0.6 s" },
     { value: 900, label: "0.9 s (long pauses while thinking)" },
   ]
 
@@ -63,8 +65,9 @@
   // (about 12 s) and replayed, so a brief outage doesn't lose words.
   const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000]
   const RECONNECT_MAX_ATTEMPTS = 10
-  const MAX_BUFFERED_FRAMES = 60
-  const LIVE_FRAME_MS = 200
+  // Zero-drop: ~24 s of 100 ms frames are kept while the socket is down.
+  const MAX_BUFFERED_FRAMES = 240
+  const LIVE_FRAME_MS = 100
 
   // A failed translation is retried before it is reported, at most a few run at once,
   // and one that hangs can't hold up the lines behind it forever.
@@ -140,6 +143,9 @@
     collapsed: false,
     // The big transcript board, opened from the header.
     boardOpen: false,
+    // Live mix levels (percent), WebSocket health per direction.
+    mix: { raw: 100, translator: 100, interpreting: false },
+    link: { outgoing: "off", incoming: "off" },
     // Who is talking on the client side right now, and what they are called.
     participants: [],
     activeSpeakers: [],
@@ -406,6 +412,10 @@
       board: board.root,
       boardBody: board.body,
       boardEmpty: board.empty,
+      boardCols: board.cols,
+      badgeMix: board.badgeMix,
+      badgeLink: board.badgeLink,
+      badgePair: board.badgePair,
       boardBtn,
       stopAllBtn,
     })
@@ -439,15 +449,32 @@
     const summaryBtn = el("button", { type: "button", className: "mai-board-btn", text: "Summary" })
     summaryBtn.addEventListener("click", handleSummarize)
 
+    // Dual pane: my outgoing speech on the left, the client's incoming speech on the right.
+    const colOut = el("div", { className: "mai-col mai-col-outgoing" })
+    const colIn = el("div", { className: "mai-col mai-col-incoming" })
+    const heads = el("div", { className: "mai-col-heads" }, [
+      el("h3", { className: "mai-col-head mai-col-head-outgoing", text: "My speech (Bangla → client)" }),
+      el("h3", { className: "mai-col-head mai-col-head-incoming", text: "Client speech (→ Bangla)" }),
+    ])
+    const cols = el("div", { className: "mai-board-cols" }, [colOut, colIn])
+    body.append(cols)
+
+    const badgeMix = el("span", { className: "mai-badge mai-badge-mix", text: "Raw Mic: 100% | Translator: 100%" })
+    const badgeLink = el("span", { className: "mai-badge", "data-tone": "off", text: "WS: idle" })
+    const badgePair = el("span", { className: "mai-badge mai-badge-pair", text: "BN → JA" })
+    const badges = el("div", { className: "mai-badges", role: "status" }, [badgePair, badgeLink, badgeMix])
+
     const root = el("section", { className: "mai-board", "aria-label": "Transcript board", hidden: true }, [
       el("div", { className: "mai-board-header" }, [
         el("h2", { className: "mai-board-title", text: "Meeting board" }),
         el("div", { className: "mai-board-actions" }, [copyBtn, summaryBtn, closeBtn]),
       ]),
+      badges,
+      heads,
       body,
     ])
 
-    return { root, body, empty }
+    return { root, body, empty, cols: { outgoing: colOut, incoming: colIn }, badgeMix, badgeLink, badgePair }
   }
 
   // The board keeps its own copy of the lines, so it can be read at a glance
@@ -475,25 +502,65 @@
     return name || ""
   }
 
+  // One-line "key point" so a missed sentence can be understood at a glance: the first
+  // sentence of the translation, trimmed.
+  const keyPoint = (text) => {
+    const clean = (text || "").replace(/\s+/g, " ").trim()
+    if (!clean) return ""
+    const first = clean.match(/^.*?[。．.!?！？](?=\s|$)/u)?.[0] || clean
+    return first.length > 90 ? `${first.slice(0, 87).trim()}…` : first
+  }
+
   const renderBoardLine = (direction, speakerName, source, translation) => {
     if (!ui.boardBody) return
     if (ui.boardEmpty.isConnected) ui.boardEmpty.remove()
     const who = boardWho(direction, speakerName)
-    const line = el("article", { className: `mai-board-line mai-board-line-${direction}` }, [
-      el("p", { className: "mai-board-who", text: who }),
+    const isOut = direction === "outgoing"
+    const point = keyPoint(translation || source)
+    const card = el("article", { className: `mai-board-line mai-board-line-${direction}` }, [
+      el("p", { className: "mai-board-who", text: `${who} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` }),
+      source ? el("p", { className: "mai-board-label", text: isOut ? "Original (Bangla)" : "Original" }) : null,
       source ? el("p", { className: "mai-board-source", text: source }) : null,
+      translation ? el("p", { className: "mai-board-label", text: isOut ? `Sent to client (${LANG_LABELS[state.targetLang] || state.targetLang})` : "Translated (Bangla)" }) : null,
       translation ? el("p", { className: "mai-board-text", text: translation }) : null,
+      point ? el("p", { className: "mai-board-keypoint", text: `Key point: ${point}` }) : null,
     ])
-    ui.boardBody.append(line)
-    while (ui.boardBody.children.length > MAX_BOARD_LINES) ui.boardBody.firstElementChild.remove()
-    ui.boardBody.scrollTop = ui.boardBody.scrollHeight
+    const col = ui.boardCols[direction] || ui.boardCols.incoming
+    col.append(card)
+    while (col.children.length > MAX_BOARD_LINES) col.firstElementChild.remove()
+    card.scrollIntoView({ block: "nearest" })
+  }
+
+  // Status badges: language pair, WebSocket health, and the live mix levels.
+  const LINK_LABEL = { off: "idle", ok: "connected", retry: "reconnecting…", error: "error" }
+  const renderBadges = () => {
+    if (!ui.badgeMix) return
+    ui.badgePair.textContent = `BN → ${(state.targetLang || "ja").toUpperCase()}  ·  ${"JA/EN"} → BN`
+    const worst = [state.link.outgoing, state.link.incoming].includes("error")
+      ? "error"
+      : [state.link.outgoing, state.link.incoming].includes("retry")
+        ? "retry"
+        : [state.link.outgoing, state.link.incoming].includes("ok")
+          ? "ok"
+          : "off"
+    ui.badgeLink.dataset.tone = worst
+    ui.badgeLink.textContent = `WS: ${LINK_LABEL[worst]} (me ${LINK_LABEL[state.link.outgoing]} · client ${LINK_LABEL[state.link.incoming]})`
+    ui.badgeMix.dataset.ducked = String(state.mix.interpreting && state.mix.raw < 100)
+    ui.badgeMix.textContent = `Raw Mic: ${state.mix.raw}% | Translator: ${state.mix.translator}%`
+  }
+  const setLink = (direction, value) => {
+    state.link[direction] = value
+    renderBadges()
   }
 
   const handleBoardToggle = () => {
     state.boardOpen = !state.boardOpen
     ui.board.hidden = !state.boardOpen
     ui.boardBtn.setAttribute("aria-pressed", String(state.boardOpen))
-    if (state.boardOpen) ui.boardBody.scrollTop = ui.boardBody.scrollHeight
+    if (state.boardOpen) {
+      renderBadges()
+      ui.boardBody.scrollTop = ui.boardBody.scrollHeight
+    }
   }
 
   const handleBoardCopy = async () => {
@@ -649,12 +716,12 @@
       }),
       el("label", { className: "mai-check", for: "mai-mute-client" }, [
         muteClientInput,
-        el("span", { text: "Lower client's original voice" }),
+        el("span", { text: "Mute client's original voice (single voice mode)" }),
       ]),
       el("p", {
         className: "mai-hint",
         id: "mai-mute-client-hint",
-        text: "Turns the client's real Japanese/English voice in Google Meet down to a quiet level (fully silent without headphones), so you mainly hear the translated Bangla but can still tell when they are talking.",
+        text: "Completely mutes the client's real Japanese/English voice in Google Meet so you only hear the translated Bangla voice, avoiding double audio and echo.",
       }),
       el("label", { for: "mai-client-source", className: "mai-field-label", text: "Get the client's words from" }),
       clientSourceSelect,
@@ -1161,9 +1228,9 @@
       setStatus("Meet mic is muted, so that sentence was not sent.", "warning")
       return
     }
-    if (state.incomingPlaying && !state.headphones) {
-      // Likely the client's Bangla voice leaking from speakers into the mic.
-      setStatus("Not sent: heard while the client's Bangla was playing. Use headphones and say it again.", "warning")
+    if (state.incomingPlaying) {
+      // The client's Bangla voice is playing, so discard speaker audio to prevent echo.
+      setStatus("Not sent: heard while the client's Bangla was playing. Say it again now.", "warning")
       return
     }
     enqueueLiveClip(buildTextClip(text))
@@ -1368,12 +1435,18 @@
     switch (message.type) {
       case "ready":
         session.ready = true
+        setLink("incoming", "ok")
         setStatus("Client live listener on. Japanese and English will translate to Bangla.", "success")
         onLiveReady(session)
         break
       case "status":
-        if (message.state === "reconnecting") setStatus("Client listener connection dropped, reconnecting…", "warning")
-        else if (message.state === "connected") setStatus("Client listener reconnected.", "success")
+        if (message.state === "reconnecting") {
+          setLink("incoming", "retry")
+          setStatus("Client listener connection dropped, reconnecting…", "warning")
+        } else if (message.state === "connected") {
+          setLink("incoming", "ok")
+          setStatus("Client listener reconnected.", "success")
+        }
         break
       case "interim":
         renderInterim(message.text || "", "incoming", currentSpeakerName())
@@ -1503,6 +1576,7 @@
   }
 
   const handleClientLiveDrop = (session) => {
+    if (!session.finished) setLink("incoming", "retry")
     if (session.finished) return
     const old = session.port
     session.port = null
@@ -1584,6 +1658,7 @@
   const finishClientLive = (session, errorMessage = null) => {
     if (session.finished) return
     session.finished = true
+    setLink("incoming", "off")
     clearTimeout(session.stopTimer)
     clearTimeout(session.closeTimer)
     clearTimeout(session.reconnectTimer)
@@ -1682,6 +1757,7 @@
     switch (message.type) {
       case "ready":
         session.ready = true
+        setLink("outgoing", "ok")
         setStatus(
           `Live interpreter on. Speak Bangla; the client hears ${LANG_LABELS[session.targetLang]} while you talk.`,
           "success"
@@ -1689,8 +1765,13 @@
         onLiveReady(session)
         break
       case "status":
-        if (message.state === "reconnecting") setStatus("Live interpreter connection dropped, reconnecting…", "warning")
-        else if (message.state === "connected") setStatus("Live interpreter reconnected.", "success")
+        if (message.state === "reconnecting") {
+          setLink("outgoing", "retry")
+          setStatus("Live interpreter connection dropped, reconnecting…", "warning")
+        } else if (message.state === "connected") {
+          setLink("outgoing", "ok")
+          setStatus("Live interpreter reconnected.", "success")
+        }
         break
       case "source_delta":
         appendLiveDelta(session, "source", message.delta)
@@ -1721,6 +1802,10 @@
           // Keep the reason, so the message that replaces this one still shows
           // what actually went wrong.
           session.fatalMessage = message.message || "unknown error"
+        } else if (message.message) {
+          // A retryable failure still carries the reason; keep it for the
+          // reconnect message.
+          session.reconnectReason = message.message
         }
         setStatus(`Live interpreter: ${message.message || "unknown error"}`, fatal ? "error" : "warning")
         break
@@ -1755,6 +1840,7 @@
 
   const handleRealtimeDrop = (session) => {
     if (session.finished) return
+    setLink("outgoing", "retry")
     const old = session.port
     session.port = null
     try {
@@ -1854,6 +1940,7 @@
     } catch {
       // Already disconnected.
     }
+    setLink("outgoing", "off")
     if (state.realtime !== session) return
     state.realtime = null
     if (!session.stopping) postToInject("STOP_STREAM", { direction: "outgoing" })
@@ -2076,13 +2163,13 @@
     )
   }
 
-  // Both on: stop both. Otherwise start whichever direction isn't running yet.
+  // Both on: stop both and return to normal mode. Otherwise start whichever direction isn't running yet.
   const handleConversationToggle = () => {
     if (state.mode !== "vad") return
     if (DIRECTIONS.some((direction) => state.directions[direction].status === "processing")) return
-    const live = DIRECTIONS.filter((direction) => state.directions[direction].status === "live")
-    if (live.length === DIRECTIONS.length) {
-      live.forEach(handleToggle)
+    const running = DIRECTIONS.some((direction) => isActive(direction))
+    if (running) {
+      handleStopAll()
       return
     }
     DIRECTIONS.filter((direction) => !isActive(direction)).forEach(handleToggle)
@@ -2177,6 +2264,7 @@
   const handleLangChange = (event) => {
     state.targetLang = event.target.value === "en" ? "en" : "ja"
     storageSet({ targetLang: state.targetLang })
+    renderBadges()
     if (state.realtime && state.realtime.targetLang !== state.targetLang) {
       setStatus("The live interpreter switches language after you stop and start again.", "warning")
     }
@@ -2229,11 +2317,12 @@
       handleClientLiveStreamStatus(msg.state)
       return
     }
+    if (direction === "incoming") {
+      if (msg.state === "playing" || msg.state === "voice_on") state.incomingPlaying = true
+      else if (msg.state === "played" || msg.state === "voice_off") state.incomingPlaying = false
+    }
     // Live interpreter playback/stream events that need no UI change.
     if (["streaming", "stream_stopped", "voice_on", "voice_off"].includes(msg.state)) return
-    if (direction === "incoming" && (msg.state === "playing" || msg.state === "played")) {
-      state.incomingPlaying = msg.state === "playing"
-    }
 
     if (msg.state === "recording") {
       setDirectionStatus(direction, "recording")
@@ -2276,6 +2365,12 @@
     if (event.source !== window) return
     const msg = event.data
     if (!msg || msg.source !== SOURCE || msg.target !== "bridge") return
+
+    if (msg.type === "MIX") {
+      state.mix = { raw: Number(msg.raw), translator: Number(msg.translator), interpreting: Boolean(msg.interpreting) }
+      renderBadges()
+      return
+    }
 
     if (msg.type === "MIC") {
       state.micReady = Boolean(msg.ready)

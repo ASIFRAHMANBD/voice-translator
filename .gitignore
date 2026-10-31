@@ -26,3 +26,13 @@ Thumbs.db
 scratch/
 scratch*
 *.pcm
+
+# Local secrets (signing keys, API tokens)
+.secrets/
+
+# IDE / local caches
+.puku/
+
+# Extension packages
+*.zip
+

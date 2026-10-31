@@ -780,3 +780,76 @@
     border: 1px solid CanvasText;
   }
 }
+
+/* Dual-pane board, status badges, summary cards ----------------------------- */
+#meet-ai-hud .mai-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mai-space-2);
+}
+
+#meet-ai-hud .mai-badge {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 600;
+  background: var(--mai-surface-raised);
+  border: 1px solid var(--mai-border);
+  color: var(--mai-text);
+}
+
+#meet-ai-hud .mai-badge[data-tone="ok"] { border-color: var(--mai-success); color: var(--mai-success); }
+#meet-ai-hud .mai-badge[data-tone="retry"] { border-color: #fdd663; color: #fdd663; }
+#meet-ai-hud .mai-badge[data-tone="error"] { border-color: #f28b82; color: #f28b82; }
+#meet-ai-hud .mai-badge-mix[data-ducked="true"] { border-color: var(--mai-accent); color: var(--mai-accent); }
+
+#meet-ai-hud .mai-col-heads,
+#meet-ai-hud .mai-board-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--mai-space-3);
+}
+
+#meet-ai-hud .mai-col-head {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#meet-ai-hud .mai-col-head-outgoing { color: var(--mai-success); }
+#meet-ai-hud .mai-col-head-incoming { color: var(--mai-accent); }
+
+#meet-ai-hud .mai-board-cols { align-items: start; }
+#meet-ai-hud .mai-col { display: flex; flex-direction: column; gap: var(--mai-space-3); min-width: 0; }
+#meet-ai-hud .mai-board-empty,
+#meet-ai-hud .mai-board-line-summary { grid-column: 1 / -1; }
+
+#meet-ai-hud .mai-col .mai-board-line {
+  padding: var(--mai-space-3);
+  border: 1px solid var(--mai-border);
+  border-left-width: 5px;
+  border-radius: var(--mai-radius-md);
+  background: var(--mai-surface);
+}
+#meet-ai-hud .mai-col .mai-board-line-outgoing { border-left-color: var(--mai-success); }
+#meet-ai-hud .mai-col .mai-board-line-incoming { border-left-color: var(--mai-accent); }
+
+#meet-ai-hud .mai-board-label {
+  margin: var(--mai-space-1) 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mai-text-muted);
+}
+#meet-ai-hud .mai-board-source { font-size: 17px; color: var(--mai-text); }
+#meet-ai-hud .mai-board-keypoint {
+  margin: var(--mai-space-2) 0 0;
+  padding: var(--mai-space-2) var(--mai-space-3);
+  border-radius: var(--mai-radius-md);
+  background: rgba(253, 214, 99, 0.12);
+  color: #fdd663;
+  font-size: 16px;
+  font-weight: 600;
+}

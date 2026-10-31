@@ -13,7 +13,8 @@ import type { Voice } from "../types.js"
 
 const MAX_AUDIO_BASE64 = 256 * 1024
 // Audio kept while connecting or reconnecting, so the first words aren't lost (~10 s).
-const MAX_QUEUED_FRAMES = 50
+// Zero-drop: ~60 s of 100 ms frames. Frames are only discarded beyond this.
+const MAX_QUEUED_FRAMES = 600
 const MAX_RECONNECTS = 5
 // After "stop", wait this long for the last translated words before giving up.
 const DRAIN_TIMEOUT_MS = 8_000
@@ -22,6 +23,14 @@ const SILENCE_PEAK = 300
 // The service speaks in chunks that break mid-word, so text is collected until a
 // sentence ends before it is synthesized in the chosen voice.
 const SENTENCE_END = /[。．.!?！？]\s*$/u
+// Clause boundaries let speech start before the sentence is finished (simultaneous
+// interpretation). A clause is only spoken once it is long enough to sound natural.
+const CLAUSE_END = /[、，,;；:：]\s*$/u
+const MIN_CLAUSE_CHARS = 10
+// If the service pauses mid-clause, speak what we have after this much quiet.
+const SPEECH_IDLE_FLUSH_MS = 350
+const MAX_SYNTH_CHARS = 60
+const MAX_PARALLEL_SYNTH = 2
 const MIN_SYNTH_CHARS = 2
 
 type Outgoing =
@@ -94,8 +103,12 @@ export const handleTranslateClient = (client: WebSocket, targetLang: string, ini
   let voice: Voice = initialVoice
   let tts = useOwnVoice ? createTtsAdapter(config) : null
   let synthText = ""
-  let synthBusy = false
-  const synthQueue: string[] = []
+  // Sentences/clauses are synthesized in parallel (MAX_PARALLEL_SYNTH) but sent to the
+  // extension strictly in order, so a slow clip never reorders or drops its neighbours.
+  let synthInflight = 0
+  let synthChain: Promise<void> = Promise.resolve()
+  let synthIdleTimer: NodeJS.Timeout | null = null
+  const synthWaiting: Array<() => void> = []
 
   const send = (message: Outgoing) => {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(message))
@@ -111,55 +124,101 @@ export const handleTranslateClient = (client: WebSocket, targetLang: string, ini
     while (queue.length > 0 && ready && upstreamOpen()) appendAudio(queue.shift() as string)
   }
 
-  // Speaks queued sentences one at a time, so the order and the gaps stay right.
-  const drainSynthQueue = async () => {
-    if (synthBusy || !tts) return
-    synthBusy = true
-    try {
-      while (synthQueue.length > 0) {
-        const text = synthQueue.shift() as string
-        if (!text.trim()) continue
-        try {
-          const speech = await tts.synthesize(text, targetLang, { rate: 1, voice })
-          // The extension plays MP3 through the normal PLAY path.
-          send({ type: "synth", audio: speech.audio.toString("base64"), mime: speech.mime })
-          console.info(`[live ${targetLang}] spoke: ${text}`)
-        } catch (err) {
-          const message = err instanceof Error ? err.message : err
-          console.warn(`[live ${targetLang}] voice synthesis failed: ${message}`)
-          // No voice at all is worse than the wrong voice, so the service's own
-          // audio is used from here on.
-          send({ type: "error", message: `Could not speak with the ${voice} voice (${message}). Using the service voice instead.`, fatal: false })
-          useOwnVoice = false
-          synthText = ""
-          synthQueue.length = 0
-        }
+  const synthesizeWithRetry = async (text: string) => {
+    let lastError: unknown
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await (tts as NonNullable<typeof tts>).synthesize(text, targetLang, { rate: 1, voice })
+      } catch (err) {
+        lastError = err
       }
-    } finally {
-      synthBusy = false
     }
+    throw lastError
   }
 
-  // The service emits text in pieces that break mid-sentence, so a piece is only
-  // spoken once a sentence ends (or the text grows past a usable length).
+  const acquireSynthSlot = () =>
+    synthInflightSlots < MAX_PARALLEL_SYNTH
+      ? (synthInflightSlots++, Promise.resolve())
+      : new Promise<void>((resolve) => synthWaiting.push(resolve))
+  let synthInflightSlots = 0
+  const releaseSynthSlot = () => {
+    const next = synthWaiting.shift()
+    if (next) next()
+    else synthInflightSlots -= 1
+  }
+
+  // Queues one piece of text for speech. Synthesis starts immediately; delivery is FIFO.
+  // The text itself was already sent as translation_delta, so a TTS failure can never
+  // lose the transcript.
+  const speak = (text: string) => {
+    if (!tts || text.trim().length < MIN_SYNTH_CHARS) return
+    synthInflight += 1
+    const job = acquireSynthSlot().then(async () => {
+      try {
+        return await synthesizeWithRetry(text)
+      } finally {
+        releaseSynthSlot()
+      }
+    })
+    job.catch(() => {})
+    synthChain = synthChain.then(async () => {
+      try {
+        const speech = await job
+        send({ type: "synth", audio: speech.audio.toString("base64"), mime: speech.mime })
+        console.info(`[live ${targetLang}] spoke: ${text}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : err
+        console.warn(`[live ${targetLang}] voice synthesis failed: ${message}`)
+        // Only this clip is lost (its text is on screen). The next ones are still tried;
+        // after repeated failures the service's own audio takes over.
+        synthFailures += 1
+        send({ type: "error", message: `Voice failed for one phrase (${message}).`, fatal: false })
+        if (synthFailures >= 3) {
+          send({ type: "error", message: `Could not speak with the ${voice} voice. Using the service voice instead.`, fatal: false })
+          useOwnVoice = false
+          synthText = ""
+        }
+      } finally {
+        synthInflight -= 1
+      }
+    })
+  }
+  let synthFailures = 0
+
+  const clearIdleTimer = () => {
+    if (synthIdleTimer) clearTimeout(synthIdleTimer)
+    synthIdleTimer = null
+  }
+
+  // The service emits text in pieces that break mid-sentence. Speech starts at a
+  // sentence end, at a clause end once it is long enough, when the text gets long,
+  // or after a short quiet (SPEECH_IDLE_FLUSH_MS), so the client hears the
+  // translation while the host is still talking.
   const collectForSpeech = (delta: string) => {
     synthText += delta
-    if (!SENTENCE_END.test(synthText) && synthText.length < 120) return
-    const text = synthText.trim()
-    synthText = ""
-    if (text.length < MIN_SYNTH_CHARS) return
-    synthQueue.push(text)
-    void drainSynthQueue()
+    clearIdleTimer()
+    const len = synthText.trim().length
+    const ready =
+      SENTENCE_END.test(synthText) ||
+      (CLAUSE_END.test(synthText) && len >= MIN_CLAUSE_CHARS) ||
+      synthText.length >= MAX_SYNTH_CHARS
+    if (ready) {
+      const text = synthText.trim()
+      synthText = ""
+      speak(text)
+      return
+    }
+    synthIdleTimer = setTimeout(() => flushSpeech(), SPEECH_IDLE_FLUSH_MS)
+    synthIdleTimer.unref?.()
   }
 
   // The last words often have no closing punctuation, so they are spoken too.
   const flushSpeech = () => {
+    clearIdleTimer()
     if (!useOwnVoice || !synthText.trim()) return
     const text = synthText.trim()
     synthText = ""
-    if (text.length < MIN_SYNTH_CHARS) return
-    synthQueue.push(text)
-    void drainSynthQueue()
+    speak(text)
   }
 
   // The dropdown can change the voice while the session runs. Switching to
@@ -178,6 +237,7 @@ export const handleTranslateClient = (client: WebSocket, targetLang: string, ini
     if (finished) return
     finished = true
     if (drainTimer) clearTimeout(drainTimer)
+    clearIdleTimer()
     const seconds = Math.round((Date.now() - startedAt) / 1000)
     console.info(`[live ${targetLang}] ended (${reason}) after ${seconds}s`)
     if (transcript.source) console.info(`[live ${targetLang}] heard: ${transcript.source.slice(-300)}`)
@@ -200,13 +260,13 @@ export const handleTranslateClient = (client: WebSocket, targetLang: string, ini
   // client is held open until the queue is empty. Otherwise that audio is lost.
   const finishAfterSpeech = (reason: string) => {
     flushSpeech()
-    if (!synthBusy && synthQueue.length === 0) {
+    if (synthInflight === 0) {
       finish(reason)
       return
     }
     const wait = setInterval(() => {
       if (finished) return
-      if (synthBusy || synthQueue.length > 0) return
+      if (synthInflight > 0) return
       clearInterval(wait)
       finish(reason)
     }, 100)

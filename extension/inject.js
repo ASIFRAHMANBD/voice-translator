@@ -1,7 +1,7 @@
 // Runs in the page's MAIN world at document_start so it can wrap getUserMedia
 // before Google Meet captures a reference to it. No chrome.* APIs exist here;
 // everything that needs the extension goes through bridge.js via postMessage.
-;(() => {
+; (() => {
   if (window.__meetAiInterpreterInstalled) return
   window.__meetAiInterpreterInstalled = true
 
@@ -57,33 +57,36 @@
     incomingHangoverMs: 1_000,
   }
 
+  // Audio mix ratios
+  const MIX = {
+    normal: 1.0,
+    dimmed: 0.15,
+    silent: 0.0,
+  }
+
   const state = {
     audioCtx: null,
     virtualMicDest: null,
     realMicStream: null,
+    rawMicSource: null,
+    rawMicGain: null,
+    hostAnalyser: null,
+    hostSamples: null,
     liveVirtualTracks: new Set(),
     meetMuted: false,
-    // When the host presses Stop, Meet must get the real microphone back so the
-    // meeting returns to normal audio. The passthrough copies the real mic into
-    // the virtual mic that Meet already holds.
+    interpreting: false,
+    remoteMonitors: new Map(),
     passthrough: false,
     recorders: { outgoing: null, incoming: null },
     live: { outgoing: null, incoming: null },
     streams: { outgoing: null, incoming: null },
     pcmPlayers: { outgoing: null, incoming: null },
-    // Without headphones the client's Bangla voice leaks into the mic; then mute
-    // outgoing capture while it plays. With headphones, keep listening.
     gateOnPlayback: false,
-    // When true, remote client speech in Google Meet is kept muted so you only hear
-    // the AI-generated Bangla translation without double audio.
     muteClientOriginal: true,
     incomingActive: false,
     incoming: { bus: null, dest: null, sources: new Map(), observer: null, rescanTimer: null, users: 0 },
-    // Remote participants are tracked separately so the client-side text can say
-    // who is speaking when several people talk at once.
     participants: new Map(),
     participantCounter: 0,
-    // Per-participant level meters, used to find out who is talking.
     speakerDetectors: new Map(),
     playQueues: { outgoing: Promise.resolve(), incoming: Promise.resolve() },
     duckCount: 0,
@@ -106,6 +109,15 @@
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext
     state.audioCtx = new AudioContextCtor()
     state.virtualMicDest = state.audioCtx.createMediaStreamDestination()
+
+    state.rawMicGain = state.audioCtx.createGain()
+    state.rawMicGain.gain.value = MIX.silent
+    state.rawMicGain.connect(state.virtualMicDest)
+
+    state.hostAnalyser = state.audioCtx.createAnalyser()
+    state.hostAnalyser.fftSize = 512
+    state.hostSamples = new Float32Array(state.hostAnalyser.fftSize)
+
     return state.audioCtx
   }
 
@@ -115,8 +127,27 @@
   }
 
   // Chrome starts AudioContexts suspended until a user gesture.
-  window.addEventListener("pointerdown", () => { resumeAudio().catch(() => {}) }, { capture: true })
-  window.addEventListener("keydown", () => { resumeAudio().catch(() => {}) }, { capture: true })
+  window.addEventListener("pointerdown", () => { resumeAudio().catch(() => { }) }, { capture: true })
+  window.addEventListener("keydown", () => { resumeAudio().catch(() => { }) }, { capture: true })
+
+  const attachRawMic = (stream) => {
+    ensureAudioGraph()
+    if (!stream || !state.audioCtx) return
+    if (state.rawMicSource) {
+      try {
+        state.rawMicSource.disconnect()
+      } catch { }
+      state.rawMicSource = null
+    }
+    try {
+      state.rawMicSource = state.audioCtx.createMediaStreamSource(stream)
+      state.rawMicSource.connect(state.rawMicGain)
+      state.rawMicSource.connect(state.hostAnalyser)
+      log("attached real mic to raw gain and host analyser")
+    } catch (err) {
+      log(`could not attach raw mic: ${err.message}`)
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // getUserMedia override: Meet receives the virtual mic, we keep the real one
@@ -138,13 +169,20 @@
     if (state.streams.outgoing) stopStream("outgoing")
     state.realMicStream.getTracks().forEach((track) => track.stop())
     state.realMicStream = null
+    if (state.rawMicSource) {
+      try { state.rawMicSource.disconnect() } catch { }
+      state.rawMicSource = null
+    }
     postMicState()
   }
 
   const replaceRealMic = (audioTracks) => {
     const previous = state.realMicStream
     state.realMicStream = new MediaStream(audioTracks)
-    if (previous) previous.getTracks().forEach((track) => track.stop())
+    if (previous && previous !== state.realMicStream) {
+      previous.getTracks().forEach((track) => track.stop())
+    }
+    attachRawMic(state.realMicStream)
     postMicState()
 
     const session = state.live.outgoing
@@ -152,7 +190,6 @@
       stopLive("outgoing", true)
       startLive("outgoing", session.silenceMs)
     }
-    // Meet switched microphones: keep the live interpreter on the new one.
     if (state.streams.outgoing) {
       stopStream("outgoing", false)
       startStream("outgoing").catch(reportError("outgoing"))
@@ -162,29 +199,12 @@
   const isOutgoingCaptureActive = () =>
     state.recorders.outgoing?.state === "recording" || Boolean(state.live.outgoing) || Boolean(state.streams.outgoing)
 
-  // Copies the real microphone into the virtual mic that Meet is holding, so the
-  // meeting hears the host again after the interpreter is stopped.
   const startPassthrough = () => {
-    if (state.passthrough) return
-    if (!state.realMicStream || !state.audioCtx) return
-    try {
-      const source = state.audioCtx.createMediaStreamSource(state.realMicStream)
-      source.connect(state.virtualMicDest)
-      state.passthrough = source
-      log("passthrough on: the real microphone is back in the meeting")
-    } catch (err) {
-      log(`could not start the passthrough: ${err.message}`)
-    }
+    state.interpreting = false
+    log("passthrough on: host in normal meeting mode")
   }
 
   const stopPassthrough = () => {
-    if (!state.passthrough) return
-    try {
-      state.passthrough.disconnect()
-    } catch {
-      // Already disconnected.
-    }
-    state.passthrough = null
     log("passthrough off")
   }
 
@@ -196,7 +216,6 @@
     track.stop = () => {
       originalStop()
       state.liveVirtualTracks.delete(track)
-      if (state.liveVirtualTracks.size === 0 && !isOutgoingCaptureActive()) stopRealMic()
     }
     return track
   }
@@ -224,6 +243,134 @@
     return new MediaStream([...realStream.getVideoTracks(), createVirtualTrack()])
   }
 
+  // Local stream detection: prevents self-view and virtual mic loops
+  const isLocalStream = (stream) => {
+    if (!stream || !(stream instanceof MediaStream)) return false
+    if (state.realMicStream && (stream === state.realMicStream || stream.id === state.realMicStream.id)) return true
+    if (state.virtualMicDest && (stream === state.virtualMicDest.stream || stream.id === state.virtualMicDest.stream.id)) return true
+    const tracks = stream.getAudioTracks()
+    for (const track of tracks) {
+      if (state.liveVirtualTracks.has(track)) return true
+      if (state.realMicStream && state.realMicStream.getAudioTracks().some((t) => t === track || t.id === track.id)) return true
+      if (state.virtualMicDest && state.virtualMicDest.stream.getAudioTracks().some((t) => t === track || t.id === track.id)) return true
+    }
+    return false
+  }
+
+  // ---------------------------------------------------------------------------
+  // Remote audio monitoring & Acoustic Echo Prevention
+  // ---------------------------------------------------------------------------
+  const registerRemoteMonitor = (stream) => {
+    if (!stream || !(stream instanceof MediaStream) || isLocalStream(stream)) return
+    if (state.remoteMonitors.has(stream)) return
+    const ctx = ensureAudioGraph()
+    if (!ctx) return
+    if (stream.getAudioTracks().length === 0) {
+      stream.addEventListener("addtrack", () => registerRemoteMonitor(stream), { once: true })
+      return
+    }
+    try {
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 512
+      source.connect(analyser)
+      const monitor = {
+        source,
+        analyser,
+        samples: new Float32Array(analyser.fftSize),
+        lastVoiceAt: 0,
+      }
+      state.remoteMonitors.set(stream, monitor)
+      log(`registered remote monitor for stream: ${stream.id}`)
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  const REMOTE_RMS_THRESHOLD = 0.008
+  const REMOTE_HANGOVER_MS = 300
+
+  const isRemoteSpeaking = () => {
+    if (state.duckCount > 0 || state.clipsPlaying > 0 || state.pcmPlayers.incoming?.active) {
+      return true
+    }
+    for (const detector of state.speakerDetectors.values()) {
+      if (detector.speaking) return true
+    }
+    const now = performance.now()
+    for (const monitor of state.remoteMonitors.values()) {
+      monitor.analyser.getFloatTimeDomainData(monitor.samples)
+      let sum = 0
+      for (let i = 0; i < monitor.samples.length; i++) {
+        sum += monitor.samples[i] * monitor.samples[i]
+      }
+      const rms = Math.sqrt(sum / monitor.samples.length)
+      if (rms > REMOTE_RMS_THRESHOLD) {
+        monitor.lastVoiceAt = now
+      }
+      if (now - monitor.lastVoiceAt < REMOTE_HANGOVER_MS) {
+        return true
+      }
+    }
+    return false
+  }
+
+  let hostLastSpokeAt = 0
+  const HOST_SPEECH_HANGOVER_MS = 400
+  const HOST_RMS_THRESHOLD = 0.012
+  const HOST_OVERRIDE_RMS = 0.035
+
+  const updateGainManager = () => {
+    if (!state.audioCtx || !state.rawMicGain || !state.hostAnalyser) return
+
+    if (state.audioCtx.state === "suspended") {
+      state.audioCtx.resume().catch(() => { })
+    }
+
+    state.hostAnalyser.getFloatTimeDomainData(state.hostSamples)
+    let sum = 0
+    for (let i = 0; i < state.hostSamples.length; i++) {
+      sum += state.hostSamples[i] * state.hostSamples[i]
+    }
+    const hostRms = Math.sqrt(sum / state.hostSamples.length)
+    const now = performance.now()
+
+    const remoteActive = isRemoteSpeaking()
+    const speechThreshold = remoteActive ? HOST_OVERRIDE_RMS : HOST_RMS_THRESHOLD
+
+    if (hostRms > speechThreshold) {
+      hostLastSpokeAt = now
+    }
+    const hostSpeaking = (now - hostLastSpokeAt) < HOST_SPEECH_HANGOVER_MS
+
+    let targetGain = MIX.silent
+
+    if (state.meetMuted) {
+      targetGain = MIX.silent
+    } else if (state.interpreting) {
+      if (remoteActive && !hostSpeaking) {
+        targetGain = MIX.silent
+      } else if (hostSpeaking) {
+        targetGain = MIX.dimmed
+      } else {
+        targetGain = MIX.silent
+      }
+    } else {
+      // Normal meeting mode (Stop clicked or initial)
+      if (remoteActive && !hostSpeaking) {
+        targetGain = MIX.silent // Prevent client voice from echoing back via laptop mic!
+      } else if (hostSpeaking) {
+        targetGain = MIX.normal // Full normal host voice
+      } else {
+        targetGain = MIX.silent
+      }
+    }
+
+    state.rawMicGain.gain.setTargetAtTime(targetGain, state.audioCtx.currentTime, 0.03)
+  }
+
+  window.setInterval(updateGainManager, 35)
+
   // ---------------------------------------------------------------------------
   // Incoming mix: every remote <audio> or <video> stream into one bus
   // ---------------------------------------------------------------------------
@@ -235,8 +382,9 @@
       const origSet = desc.set
       desc.set = function (stream) {
         origSet.call(this, stream)
-        if (stream instanceof MediaStream) {
+        if (stream instanceof MediaStream && !isLocalStream(stream)) {
           knownRemoteStreams.add(stream)
+          registerRemoteMonitor(stream)
           if (state.incoming.bus) connectIncomingSources()
           applyMeetAudioMuting()
         }
@@ -257,10 +405,10 @@
           return origVolGet.call(this)
         },
         set(val) {
-          if (shouldMuteMeetAudio() && (this.tagName === "AUDIO" || this.srcObject instanceof MediaStream)) {
+          if (shouldMuteMeetAudio() && (this.tagName === "AUDIO" || (this.tagName === "VIDEO" && this.srcObject instanceof MediaStream && !isLocalStream(this.srcObject)))) {
             // Our own ducking writes must not overwrite the volume Meet asked for.
             if (!state.applyingDuck) state.duckedVolumes.set(this, val)
-            return origVolSet.call(this, duckLevel())
+            return origVolSet.call(this, 0)
           }
           return origVolSet.call(this, val)
         },
@@ -274,7 +422,7 @@
 
   const getMeetMediaElements = () =>
     Array.from(document.querySelectorAll("audio, video")).filter(
-      (el) => el.srcObject instanceof MediaStream
+      (el) => el.srcObject instanceof MediaStream && !isLocalStream(el.srcObject)
     )
 
   // Returns all audio elements in the page — used for muting remote participants'
@@ -282,7 +430,9 @@
   const getMeetAudioElements = () => {
     const elements = new Set(document.querySelectorAll("audio"))
     document.querySelectorAll("video").forEach((el) => {
-      if (el.srcObject instanceof MediaStream) elements.add(el)
+      if (el.srcObject instanceof MediaStream && !isLocalStream(el.srcObject)) {
+        elements.add(el)
+      }
     })
     return Array.from(elements)
   }
@@ -297,13 +447,10 @@
     )
 
   const shouldMuteMeetAudio = () =>
-    (state.muteClientOriginal && isIncomingActive()) || state.duckCount > 0
-
-  const duckLevel = () => (state.gateOnPlayback ? DUCK_VOLUME : DUCK_LEVEL)
+    (state.muteClientOriginal && (isIncomingActive() || state.interpreting)) || state.duckCount > 0
 
   const applyMeetAudioMuting = () => {
     const mute = shouldMuteMeetAudio()
-    const level = duckLevel()
     state.applyingDuck = true
     try {
       getMeetAudioElements().forEach((el) => {
@@ -311,9 +458,10 @@
           if (!state.duckedVolumes.has(el)) {
             state.duckedVolumes.set(el, el.volume)
           }
-          if (el.volume !== level) {
+          if (el.volume !== 0) {
             try {
-              el.volume = level
+              el.volume = 0
+              el.muted = true
             } catch {
               // Non-fatal
             }
@@ -324,9 +472,15 @@
             state.duckedVolumes.delete(el)
             try {
               el.volume = typeof original === "number" && !isNaN(original) && original > 0 ? original : 1
+              el.muted = false
             } catch {
               // Non-fatal
             }
+          } else if (el.muted) {
+            try {
+              el.muted = false
+              el.volume = 1
+            } catch { }
           }
         }
       })
@@ -448,9 +602,13 @@
 
     const streams = new Set()
     getMeetMediaElements().forEach((el) => {
-      if (el.srcObject instanceof MediaStream) streams.add(el.srcObject)
+      if (el.srcObject instanceof MediaStream && !isLocalStream(el.srcObject)) {
+        streams.add(el.srcObject)
+      }
     })
-    knownRemoteStreams.forEach((stream) => streams.add(stream))
+    knownRemoteStreams.forEach((stream) => {
+      if (!isLocalStream(stream)) streams.add(stream)
+    })
 
     // Meet shows one tile per participant. The tile's name lets the text say
     // who is speaking, so the tiles are matched to the audio streams.
@@ -458,6 +616,8 @@
     let tileIndex = 0
     streams.forEach((stream) => {
       if (incoming.sources.has(stream)) return
+      if (isLocalStream(stream)) return
+      registerRemoteMonitor(stream)
       const name = tileNames[tileIndex] || ""
       tileIndex += 1
       registerParticipant(stream, name)
@@ -545,6 +705,8 @@
         post("ERROR", { direction, message: "Turn on your Google Meet microphone first." })
         return
       }
+      state.interpreting = true
+      attachRawMic(state.realMicStream)
       stream = state.realMicStream
     } else {
       const incoming = acquireIncomingMix()
@@ -567,7 +729,6 @@
       window.clearTimeout(autoStopTimer)
       state.recorders[direction] = null
       if (direction === "incoming") releaseIncomingMix()
-      if (direction === "outgoing" && state.liveVirtualTracks.size === 0 && !state.live.outgoing) stopRealMic()
     }
 
     recorder.ondataavailable = (event) => {
@@ -596,6 +757,7 @@
   }
 
   const stopRecording = (direction) => {
+    if (direction === "outgoing") state.interpreting = false
     const recorder = state.recorders[direction]
     if (!recorder || recorder.state !== "recording") return
     recorder.stop()
@@ -717,6 +879,8 @@
         post("ERROR", { direction, message: "Turn on your Google Meet microphone first." })
         return
       }
+      state.interpreting = true
+      attachRawMic(state.realMicStream)
       stream = state.realMicStream
       sourceNode = ctx.createMediaStreamSource(stream)
     } else {
@@ -758,6 +922,7 @@
     const session = state.live[direction]
     if (!session) return
     state.live[direction] = null
+    if (direction === "outgoing") state.interpreting = false
     window.clearInterval(session.timer)
     endSegment(session, flush)
     session.analyser.disconnect()
@@ -840,6 +1005,8 @@
         post("ERROR", { direction, message: "Turn on your Google Meet microphone first." })
         return
       }
+      state.interpreting = true
+      attachRawMic(state.realMicStream)
       source = ctx.createMediaStreamSource(state.realMicStream)
     } else {
       // Every remote participant mixed together; new ones are added as they join.
@@ -877,14 +1044,15 @@
     state.streams[direction] = null
     stream.processor.onaudioprocess = null
     if (direction === "outgoing") {
-      stream.source.disconnect()
+      state.interpreting = false
+      try { stream.source.disconnect() } catch { }
     } else {
       // The incoming mix is shared with other features; only unhook ourselves.
-      stream.source.disconnect(stream.processor)
+      try { stream.source.disconnect(stream.processor) } catch { }
       releaseIncomingMix()
     }
-    stream.processor.disconnect()
-    stream.sink.disconnect()
+    try { stream.processor.disconnect() } catch { }
+    try { stream.sink.disconnect() } catch { }
     // The last partial frame holds the final syllables; send it too.
     if (stream.filled > 0) emitStreamFrame(stream, stream.pending.slice(0, stream.filled))
     if (announce) post("STATUS", { direction, state: "stream_stopped" })
@@ -1038,6 +1206,8 @@
     const msg = event.data
     if (!msg || msg.source !== SOURCE || msg.target !== "inject") return
 
+    resumeAudio().catch(() => { })
+
     if (msg.type === "HELLO") {
       postMicState()
       return
@@ -1056,13 +1226,14 @@
     // One click to go back to a normal meeting: every capture and every stream
     // stops, and the real microphone is handed back to Meet.
     if (msg.type === "STOP_ALL") {
+      state.interpreting = false
+      state.incomingActive = false
       stopStream("outgoing")
       stopStream("incoming")
       if (state.live.outgoing) stopLive("outgoing", false)
       if (state.live.incoming) stopLive("incoming", false)
       if (state.recorders.outgoing) stopRecording("outgoing")
       if (state.recorders.incoming) stopRecording("incoming")
-      state.incomingActive = false
       applyMeetAudioMuting()
       startPassthrough()
       return
@@ -1070,6 +1241,9 @@
     if (!isDirection(msg.direction)) return
 
     if (msg.type === "START_STREAM") {
+      if (msg.direction === "outgoing") {
+        state.interpreting = true
+      }
       if (msg.direction === "incoming") {
         state.incomingActive = true
         applyMeetAudioMuting()
@@ -1078,6 +1252,9 @@
       return
     }
     if (msg.type === "STOP_STREAM") {
+      if (msg.direction === "outgoing") {
+        state.interpreting = false
+      }
       if (msg.direction === "incoming") {
         state.incomingActive = false
         applyMeetAudioMuting()
@@ -1090,6 +1267,9 @@
       return
     }
     if (msg.type === "START_REC") {
+      if (msg.direction === "outgoing") {
+        state.interpreting = true
+      }
       if (msg.direction === "incoming") {
         state.incomingActive = true
         applyMeetAudioMuting()
@@ -1099,6 +1279,9 @@
       return
     }
     if (msg.type === "STOP_REC") {
+      if (msg.direction === "outgoing") {
+        state.interpreting = false
+      }
       if (msg.direction === "incoming") {
         state.incomingActive = false
         applyMeetAudioMuting()

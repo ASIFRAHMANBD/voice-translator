@@ -1,11 +1,26 @@
 {
   "manifest_version": 3,
   "name": "Meet AI Interpreter (BN <-> JA/EN)",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Live Bangla <-> Japanese/English interpreter and meeting assistant for Google Meet.",
   "permissions": ["storage"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Meet AI Interpreter",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhygnxd9MYhuzer7UaSO3Hk27yZB0IqXnGBxHinnAcx/X4HeIz6jwFlxYGoBl2Gw2St7MiMNmmQimlF8N12hKmz3PI6pFjbxcSv35tG6ZvCiJTquksw2m0aLo0b0nYC0gxqxjuBKm3jayrQ/OxA/IzcvpMNCNmwCnrjOHgP1qjyk3BnU3m1xcOIPB6L1DE89Au7WF4ma+rHBElaPz3znzb1pW1WfmaHSJsqspZgGprYMeLueVeimG9l6bwrE3i4CMIXqU4ZNpWZoORSVbXqkNQumXioTFa1MO+AIxGznRMCxRl/5bvFBGDRH/rIcu/r+AFKsMHZbH1y8wZ3lczpFxbQIDAQAB",
   "host_permissions": [
     "https://meet.google.com/*",
+    "https://translate.cloudproductionltd.com/*",
     "http://localhost:3000/*",
     "http://127.0.0.1:3000/*"
   ],

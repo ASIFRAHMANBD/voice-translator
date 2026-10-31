@@ -1,6 +1,6 @@
 // Service worker: the only place that talks to the backend. Running the fetch here
 // keeps it outside Meet's page CSP (connect-src) and keeps the API token out of the page.
-const DEFAULT_BACKEND_URL = "http://localhost:3000"
+const DEFAULT_BACKEND_URL = "https://translate.cloudproductionltd.com"
 const REQUEST_TIMEOUT_MS = 30_000
 const SUMMARY_TIMEOUT_MS = 90_000
 const MAX_AUDIO_BASE64_LENGTH = 14 * 1024 * 1024

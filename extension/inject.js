@@ -295,11 +295,11 @@
     }
   }
 
-  const REMOTE_RMS_THRESHOLD = 0.008
-  const REMOTE_HANGOVER_MS = 300
+  const REMOTE_RMS_THRESHOLD = 0.004
+  const REMOTE_HANGOVER_MS = 500
 
   const isRemoteSpeaking = () => {
-    if (state.duckCount > 0 || state.clipsPlaying > 0 || state.pcmPlayers.incoming?.active) {
+    if (state.duckCount > 0 || state.clipsPlaying > 0 || Boolean(state.pcmPlayers.incoming?.active)) {
       return true
     }
     for (const detector of state.speakerDetectors.values()) {
@@ -307,6 +307,7 @@
     }
     const now = performance.now()
     for (const monitor of state.remoteMonitors.values()) {
+      if (!monitor.analyser) continue
       monitor.analyser.getFloatTimeDomainData(monitor.samples)
       let sum = 0
       for (let i = 0; i < monitor.samples.length; i++) {
@@ -351,7 +352,6 @@
     if (hostRms > speechThreshold) {
       hostLastSpokeAt = now
     }
-    const hostSpeaking = (now - hostLastSpokeAt) < HOST_SPEECH_HANGOVER_MS
 
     let targetGain = MIX.silent
 
@@ -363,15 +363,18 @@
       // Host raw Bangla voice is strictly silenced to Google Meet.
       targetGain = MIX.silent
     } else {
-      // Normal meeting mode (Stop clicked or initial)
-      if (remoteActive && !hostSpeaking) {
-        targetGain = MIX.silent // Duck mic while client speaks through laptop speakers to prevent acoustic echo
+      // Normal meeting mode (Stop clicked or initial):
+      // When remote client speaks, host raw mic MUST be clamped to 0.0 (silent).
+      // This completely blocks client's voice coming out of the laptop speakers
+      // from entering the host's laptop mic and echoing back to the client!
+      if (remoteActive) {
+        targetGain = MIX.silent
       } else {
-        targetGain = MIX.normal // Full normal host voice with zero gating when remote is silent
+        targetGain = MIX.normal
       }
     }
 
-    state.rawMicGain.gain.setTargetAtTime(targetGain, state.audioCtx.currentTime, 0.03)
+    state.rawMicGain.gain.setTargetAtTime(targetGain, state.audioCtx.currentTime, 0.015)
 
     const rawPct = Math.round(targetGain * 100)
     const translatorPct = state.interpreting ? 100 : 0
@@ -382,7 +385,7 @@
     }
   }
 
-  window.setInterval(updateGainManager, 35)
+  window.setInterval(updateGainManager, 20)
 
   // ---------------------------------------------------------------------------
   // Incoming mix: every remote <audio> or <video> stream into one bus
@@ -437,6 +440,16 @@
     Array.from(document.querySelectorAll("audio, video")).filter(
       (el) => el.srcObject instanceof MediaStream && !isLocalStream(el.srcObject)
     )
+
+  const ensureAllRemoteMonitored = () => {
+    getMeetMediaElements().forEach((el) => {
+      if (el.srcObject instanceof MediaStream && !isLocalStream(el.srcObject)) {
+        knownRemoteStreams.add(el.srcObject)
+        registerRemoteMonitor(el.srcObject)
+      }
+    })
+  }
+  window.setInterval(ensureAllRemoteMonitored, 1000)
 
   // Returns all audio elements in the page — used for muting remote participants'
   // original voice so only the translated AI voice is heard.
@@ -1076,6 +1089,7 @@
 
   // Gapless playback of streamed PCM16: each chunk is scheduled right after the previous one.
   const playPcm = async (direction, audioBase64, sampleRate) => {
+    if (direction === "outgoing" && !state.interpreting) return
     await resumeAudio()
     const ctx = state.audioCtx
     const pcm = new Int16Array(base64ToArrayBuffer(audioBase64))
@@ -1183,6 +1197,10 @@
     state.clipsPlaying += 1
     try {
       if (direction === "outgoing") {
+        if (!state.interpreting) {
+          log("dropping outgoing clip because conversation is stopped")
+          return
+        }
         post("STATUS", { direction, state: "playing" })
         await playBuffer(audioBuffer, state.virtualMicDest)
         post("STATUS", { direction, state: "played" })
@@ -1250,6 +1268,17 @@
       if (state.live.incoming) stopLive("incoming", false)
       if (state.recorders.outgoing) stopRecording("outgoing")
       if (state.recorders.incoming) stopRecording("incoming")
+      state.playQueues = { outgoing: Promise.resolve(), incoming: Promise.resolve() }
+      state.clipsPlaying = 0
+      state.duckCount = 0
+      if (state.pcmPlayers.outgoing) {
+        state.pcmPlayers.outgoing.active = false
+        window.clearTimeout(state.pcmPlayers.outgoing.doneTimer)
+      }
+      if (state.pcmPlayers.incoming) {
+        state.pcmPlayers.incoming.active = false
+        window.clearTimeout(state.pcmPlayers.incoming.doneTimer)
+      }
       applyMeetAudioMuting()
       startPassthrough()
       return

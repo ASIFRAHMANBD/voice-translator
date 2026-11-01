@@ -26,10 +26,10 @@ const SENTENCE_END = /[。．.!?！？]\s*$/u
 // Clause boundaries let speech start before the sentence is finished (simultaneous
 // interpretation). A clause is only spoken once it is long enough to sound natural.
 const CLAUSE_END = /[、，,;；:：]\s*$/u
-const MIN_CLAUSE_CHARS = 10
+const MIN_CLAUSE_CHARS = 18
 // If the service pauses mid-clause, speak what we have after this much quiet.
-const SPEECH_IDLE_FLUSH_MS = 350
-const MAX_SYNTH_CHARS = 60
+const SPEECH_IDLE_FLUSH_MS = 750
+const MAX_SYNTH_CHARS = 120
 const MAX_PARALLEL_SYNTH = 2
 const MIN_SYNTH_CHARS = 2
 

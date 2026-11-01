@@ -111,7 +111,7 @@
     state.virtualMicDest = state.audioCtx.createMediaStreamDestination()
 
     state.rawMicGain = state.audioCtx.createGain()
-    state.rawMicGain.gain.value = MIX.normal
+    state.rawMicGain.gain.value = MIX.silent
     state.rawMicGain.connect(state.virtualMicDest)
 
     state.hostAnalyser = state.audioCtx.createAnalyser()
@@ -295,8 +295,8 @@
     }
   }
 
-  const REMOTE_RMS_THRESHOLD = 0.012
-  const REMOTE_HANGOVER_MS = 350
+  const REMOTE_RMS_THRESHOLD = 0.004
+  const REMOTE_HANGOVER_MS = 500
 
   const isRemoteSpeaking = () => {
     if (state.duckCount > 0 || state.clipsPlaying > 0 || Boolean(state.pcmPlayers.incoming?.active)) {
@@ -363,14 +363,18 @@
       // Host raw Bangla voice is strictly silenced to Google Meet.
       targetGain = MIX.silent
     } else {
-      // Normal meeting mode (initial or Stop clicked):
-      // Full 100% natural microphone pass-through so the host's normal voice is NEVER chopped or gated.
-      targetGain = MIX.normal
+      // Normal meeting mode (Stop clicked or initial):
+      // When remote client speaks, host raw mic MUST be clamped to 0.0 (silent).
+      // This completely blocks client's voice coming out of the laptop speakers
+      // from entering the host's laptop mic and echoing back to the client!
+      if (remoteActive) {
+        targetGain = MIX.silent
+      } else {
+        targetGain = MIX.normal
+      }
     }
 
-    if (Math.abs(state.rawMicGain.gain.value - targetGain) > 0.01) {
-      state.rawMicGain.gain.setTargetAtTime(targetGain, state.audioCtx.currentTime, 0.02)
-    }
+    state.rawMicGain.gain.setTargetAtTime(targetGain, state.audioCtx.currentTime, 0.015)
 
     const rawPct = Math.round(targetGain * 100)
     const translatorPct = state.interpreting ? 100 : 0
@@ -381,7 +385,7 @@
     }
   }
 
-  window.setInterval(updateGainManager, 50)
+  window.setInterval(updateGainManager, 20)
 
   // ---------------------------------------------------------------------------
   // Incoming mix: every remote <audio> or <video> stream into one bus
